@@ -15,8 +15,11 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
     steps:
       - name: Validate release tag
+        id: release
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
@@ -24,6 +27,7 @@ jobs:
             echo "Release tag must be semantic versioning prefixed with v (for example, v0.1.0)." >&2
             exit 1
           fi
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
 
   client:
     needs: validate
@@ -63,7 +67,6 @@ jobs:
         with:
           images: ghcr.io/hortlund/tunnl-server
           tags: |
-            type=raw,value=${{ github.event.release.tag_name }}
             type=semver,pattern={{version}},value=${{ github.event.release.tag_name }}
             type=semver,pattern={{major}}.{{minor}},value=${{ github.event.release.tag_name }}
             type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
@@ -78,6 +81,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ github.event.release.tag_name }}
+            VERSION=${{ needs.validate.outputs.version }}
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.build-info.outputs.date }}

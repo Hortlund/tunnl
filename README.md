@@ -172,7 +172,7 @@ make test-race
 make lint
 ```
 
-Releases are published from GitHub's **Releases** page using a `v`-prefixed semantic version tag such as `v0.1.0`. Publishing the release triggers GoReleaser to attach cross-platform client binaries and publishes the multi-architecture server image as `ghcr.io/hortlund/tunnl-server:v0.1.0`. The exact release tag is embedded in both `tunnl --version` and `tunnld --version`; stable releases also update the `latest` image tag.
+Releases are published from GitHub's **Releases** page using a `v`-prefixed semantic version tag such as `v0.1.0`. Publishing the release triggers GoReleaser to attach cross-platform client binaries and publishes the multi-architecture server image as `ghcr.io/hortlund/tunnl-server:0.1.0`. The `v` prefix is reserved for the Git tag, so both `tunnl --version` and `tunnld --version` report `0.1.0`; stable releases also update the `latest` image tag.
 
 ## License
 
