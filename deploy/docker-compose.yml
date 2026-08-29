@@ -1,0 +1,25 @@
+services:
+  tunnld:
+    image: ghcr.io/hortlund/tunnl-server:latest
+    restart: unless-stopped
+    environment:
+      TUNNL_AUTH_TOKENS: "${TUNNL_AUTH_TOKENS:?set TUNNL_AUTH_TOKENS}"
+      TUNNL_BASE_DOMAIN: "${TUNNL_BASE_DOMAIN:-tunnl.at}"
+      TUNNL_PUBLIC_PORT: "443"
+      TUNNL_TLS_CERT: /certs/fullchain.pem
+      TUNNL_TLS_KEY: /certs/privkey.pem
+    ports:
+      - "80:8080/tcp"
+      - "443:8443/tcp"
+      - "443:8443/udp"
+    volumes:
+      - tunnl-data:/data
+      - ./certs:/certs:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  tunnl-data:
