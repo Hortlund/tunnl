@@ -31,3 +31,10 @@ jobs:
           context: .
           push: false
           tags: tunnl-server:test
+          load: true
+          build-args: |
+            VERSION=ci-test
+            COMMIT=ci-test-commit
+            BUILD_DATE=2026-01-01T00:00:00Z
+      - name: Verify embedded server version
+        run: docker run --rm tunnl-server:test --version | grep -F 'tunnld ci-test (ci-test-commit, 2026-01-01T00:00:00Z)'

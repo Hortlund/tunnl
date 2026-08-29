@@ -29,16 +29,18 @@ import (
 var errTunnelOffline = errors.New("tunnel is offline")
 
 type Config struct {
-	HTTPAddr   string
-	HTTPSAddr  string
-	QUICAddr   string
-	BaseDomain string
-	PublicPort int
-	Database   string
-	AuthTokens []string
-	TLSCert    string
-	TLSKey     string
-	Logger     *slog.Logger
+	HTTPAddr          string
+	HTTPSAddr         string
+	QUICAddr          string
+	BaseDomain        string
+	PublicPort        int
+	Database          string
+	AuthTokens        []string
+	TrustProxyHeaders bool
+	HeartbeatTimeout  time.Duration
+	TLSCert           string
+	TLSKey            string
+	Logger            *slog.Logger
 }
 
 type Server struct {
@@ -60,6 +62,9 @@ func New(config Config) (*Server, error) {
 	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
+	}
+	if config.HeartbeatTimeout <= 0 {
+		config.HeartbeatTimeout = 40 * time.Second
 	}
 	database, err := store.Open(config.Database)
 	if err != nil {
@@ -147,6 +152,7 @@ func (s *Server) acceptTunnels(ctx context.Context, listener *quic.Listener) err
 }
 
 func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
+	defer conn.CloseWithError(0, "tunnel session ended")
 	control, err := conn.AcceptStream(ctx)
 	if err != nil {
 		_ = conn.CloseWithError(1, "control stream required")
@@ -206,7 +212,7 @@ func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
 	defer s.logger.Info("tunnel disconnected", "domain", domain)
 
 	for {
-		_ = control.SetReadDeadline(time.Now().Add(40 * time.Second))
+		_ = control.SetReadDeadline(time.Now().Add(s.config.HeartbeatTimeout))
 		var message protocol.Control
 		if err := decoder.Decode(&message); err != nil {
 			return
@@ -230,12 +236,19 @@ func (s *Server) authenticate(token string) bool {
 
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /_tunnl/health", func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(writer, `{"status":"ok","tunnels":%d}`+"\n", s.registry.count())
-	})
+	mux.HandleFunc("GET /_tunnl/health", s.health)
 	mux.HandleFunc("/", s.proxy)
 	return mux
+}
+
+func (s *Server) health(writer http.ResponseWriter, request *http.Request) {
+	host := hostWithoutPort(request.Host)
+	if host != "localhost" && host != "127.0.0.1" && host != "::1" && host != "status."+strings.ToLower(s.config.BaseDomain) {
+		s.proxy(writer, request)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(writer, `{"status":"ok","tunnels":%d}`+"\n", s.registry.count())
 }
 
 func (s *Server) proxy(writer http.ResponseWriter, request *http.Request) {
@@ -243,10 +256,7 @@ func (s *Server) proxy(writer http.ResponseWriter, request *http.Request) {
 		http.Error(writer, "protocol upgrades are not supported yet", http.StatusNotImplemented)
 		return
 	}
-	host := request.Host
-	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
-		host = parsedHost
-	}
+	host := hostWithoutPort(request.Host)
 	suffix := "." + s.config.BaseDomain
 	if !strings.HasSuffix(strings.ToLower(host), suffix) {
 		http.Error(writer, "unknown tunnl host", http.StatusNotFound)
@@ -265,6 +275,7 @@ func (s *Server) proxy(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	defer stream.Close()
+	_ = http.NewResponseController(writer).EnableFullDuplex()
 	requestFinished := make(chan struct{})
 	defer close(requestFinished)
 	go func() {
@@ -278,16 +289,18 @@ func (s *Server) proxy(writer http.ResponseWriter, request *http.Request) {
 
 	outgoing := request.Clone(request.Context())
 	outgoing.RequestURI = ""
-	addForwardingHeaders(outgoing)
-	if err := outgoing.Write(stream); err != nil {
-		http.Error(writer, "tunnel request failed", http.StatusBadGateway)
-		return
-	}
+	removeHopByHopHeaders(outgoing.Header)
+	addForwardingHeaders(outgoing, s.config.TrustProxyHeaders)
+
+	requestWrite := make(chan error, 1)
+	go func() { requestWrite <- outgoing.Write(stream) }()
 	response, err := http.ReadResponse(bufio.NewReader(stream), outgoing)
 	if err != nil {
+		finishRequestWrite(request, stream, requestWrite)
 		http.Error(writer, "tunnel response failed", http.StatusBadGateway)
 		return
 	}
+	defer finishRequestWrite(request, stream, requestWrite)
 	defer response.Body.Close()
 	copyHeaders(writer.Header(), response.Header)
 	writer.Header().Set("Via", "tunnl")
@@ -297,14 +310,37 @@ func (s *Server) proxy(writer http.ResponseWriter, request *http.Request) {
 	}
 }
 
-func addForwardingHeaders(request *http.Request) {
+func finishRequestWrite(request *http.Request, stream *quic.Stream, writeDone <-chan error) {
+	select {
+	case <-writeDone:
+		return
+	default:
+	}
+	stream.CancelWrite(3)
+	_ = request.Body.Close()
+	<-writeDone
+}
+
+func hostWithoutPort(value string) string {
+	host := strings.ToLower(value)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		return parsedHost
+	}
+	return strings.TrimSuffix(host, ".")
+}
+
+func addForwardingHeaders(request *http.Request, trustIncoming bool) {
 	clientIP, _, err := net.SplitHostPort(request.RemoteAddr)
 	if err == nil {
-		if existing := request.Header.Get("X-Forwarded-For"); existing != "" {
+		if existing := request.Header.Get("X-Forwarded-For"); trustIncoming && existing != "" {
 			request.Header.Set("X-Forwarded-For", existing+", "+clientIP)
 		} else {
 			request.Header.Set("X-Forwarded-For", clientIP)
 		}
+	}
+	if !trustIncoming {
+		request.Header.Del("Forwarded")
+		request.Header.Del("X-Real-IP")
 	}
 	request.Header.Set("X-Forwarded-Host", request.Host)
 	if request.TLS != nil {
@@ -315,13 +351,37 @@ func addForwardingHeaders(request *http.Request) {
 }
 
 func copyHeaders(destination, source http.Header) {
-	for key, values := range source {
-		if strings.EqualFold(key, "Connection") || strings.EqualFold(key, "Transfer-Encoding") {
-			continue
-		}
+	cleaned := source.Clone()
+	removeHopByHopHeaders(cleaned)
+	for key, values := range cleaned {
 		for _, value := range values {
 			destination.Add(key, value)
 		}
+	}
+}
+
+var hopByHopHeaders = []string{
+	"Connection",
+	"Proxy-Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"TE",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+func removeHopByHopHeaders(headers http.Header) {
+	for _, connection := range headers.Values("Connection") {
+		for _, name := range strings.Split(connection, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				headers.Del(name)
+			}
+		}
+	}
+	for _, name := range hopByHopHeaders {
+		headers.Del(name)
 	}
 }
 

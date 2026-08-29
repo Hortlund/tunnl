@@ -41,6 +41,7 @@ func run() error {
 	token := flags.String("token", os.Getenv("TUNNL_TOKEN"), "authentication token (or TUNNL_TOKEN)")
 	hostHeader := flags.String("host-header", "", "Host header sent to the local service")
 	insecure := flags.Bool("insecure", false, "allow an untrusted relay certificate (development only)")
+	responseHeaderTimeout := flags.Duration("response-header-timeout", envDuration("TUNNL_RESPONSE_HEADER_TIMEOUT", 0), "maximum wait for local response headers (0 disables)")
 	showVersion := flags.Bool("version", false, "print version information")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -70,13 +71,14 @@ func run() error {
 	defer stop()
 	delay := time.Second
 	config := client.Config{
-		Server:             *server,
-		Token:              *token,
-		Domain:             *domain,
-		Target:             target,
-		HostHeader:         *hostHeader,
-		InsecureSkipVerify: *insecure,
-		Logger:             logger,
+		Server:                *server,
+		Token:                 *token,
+		Domain:                *domain,
+		Target:                target,
+		HostHeader:            *hostHeader,
+		InsecureSkipVerify:    *insecure,
+		ResponseHeaderTimeout: *responseHeaderTimeout,
+		Logger:                logger,
 		OnReady: func(welcome protocol.Welcome) {
 			delay = time.Second
 			fmt.Printf("\n  tunnl connected\n  public: %s\n  target: %s\n\n", welcome.URL, target)
@@ -114,6 +116,15 @@ func run() error {
 func envOr(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
+	}
+	return fallback
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := time.ParseDuration(value); err == nil {
+			return parsed
+		}
 	}
 	return fallback
 }

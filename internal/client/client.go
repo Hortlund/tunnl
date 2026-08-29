@@ -22,15 +22,16 @@ import (
 )
 
 type Config struct {
-	Server             string
-	Token              string
-	Domain             string
-	Target             *url.URL
-	HostHeader         string
-	InsecureSkipVerify bool
-	DisableState       bool
-	Logger             *slog.Logger
-	OnReady            func(protocol.Welcome)
+	Server                string
+	Token                 string
+	Domain                string
+	Target                *url.URL
+	HostHeader            string
+	InsecureSkipVerify    bool
+	DisableState          bool
+	ResponseHeaderTimeout time.Duration
+	Logger                *slog.Logger
+	OnReady               func(protocol.Welcome)
 }
 
 type Client struct {
@@ -56,7 +57,7 @@ func New(config Config) (*Client, error) {
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   100,
 			IdleConnTimeout:       90 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Second,
+			ResponseHeaderTimeout: config.ResponseHeaderTimeout,
 		},
 	}, nil
 }

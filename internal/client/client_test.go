@@ -1,6 +1,10 @@
 package client
 
-import "testing"
+import (
+	"net/url"
+	"testing"
+	"time"
+)
 
 func TestJoinURLPath(t *testing.T) {
 	t.Parallel()
@@ -13,5 +17,27 @@ func TestJoinURLPath(t *testing.T) {
 		if got := joinURLPath(test.base, test.request); got != test.want {
 			t.Errorf("joinURLPath(%q, %q) = %q, want %q", test.base, test.request, got, test.want)
 		}
+	}
+}
+
+func TestResponseHeaderTimeoutConfiguration(t *testing.T) {
+	t.Parallel()
+	target, err := url.Parse("http://127.0.0.1:3000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutTimeout, err := New(Config{Server: "relay.test:443", Token: "secret", Target: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutTimeout.transport.ResponseHeaderTimeout != 0 {
+		t.Fatalf("default timeout = %s, want disabled", withoutTimeout.transport.ResponseHeaderTimeout)
+	}
+	withTimeout, err := New(Config{Server: "relay.test:443", Token: "secret", Target: target, ResponseHeaderTimeout: 2 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withTimeout.transport.ResponseHeaderTimeout != 2*time.Minute {
+		t.Fatalf("configured timeout = %s", withTimeout.transport.ResponseHeaderTimeout)
 	}
 }

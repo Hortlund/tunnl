@@ -134,8 +134,13 @@ Back up the `tunnl-data` Docker volume. SQLite uses WAL mode with full synchrono
 | `TUNNL_TLS_KEY` | empty | TLS private key |
 | `TUNNL_SERVER` | `relay.tunnl.at:443` | Client relay address |
 | `TUNNL_TOKEN` | required | Client authentication token |
+| `TUNNL_RESPONSE_HEADER_TIMEOUT` | `0` | Maximum wait for local response headers; zero disables it |
+| `TUNNL_TRUST_PROXY_HEADERS` | `false` | Preserve forwarding headers from a trusted ingress proxy |
+| `TUNNL_HEARTBEAT_TIMEOUT` | `40s` | Maximum delay between client heartbeats before disconnecting |
 
 Generate separate high-entropy tokens for each person. A domain reservation belongs to the SHA-256 hash of the token that created it, so another client token cannot claim it.
+
+Leave `TUNNL_TRUST_PROXY_HEADERS` disabled unless direct access to the origin is restricted to a trusted proxy. Enabling it on a publicly reachable origin allows callers to spoof forwarding metadata.
 
 ## Reliability model
 

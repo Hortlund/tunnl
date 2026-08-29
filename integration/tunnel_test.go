@@ -1,6 +1,7 @@
 package integration_test
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -20,6 +21,12 @@ import (
 func TestHTTPForwardingAndStableReservation(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("X-Target", "reached")
+		writer.Header().Set("X-Seen-Forwarded-For", request.Header.Get("X-Forwarded-For"))
+		if request.URL.Path == "/reject-upload" {
+			writer.WriteHeader(http.StatusRequestEntityTooLarge)
+			_, _ = io.WriteString(writer, "rejected")
+			return
+		}
 		_, _ = io.WriteString(writer, "hello through tunnl: "+request.URL.Path)
 	}))
 	defer target.Close()
@@ -80,6 +87,7 @@ func TestHTTPForwardingAndStableReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.Host = "stable-name.tunnl.test"
+	request.Header.Set("X-Forwarded-For", "198.51.100.9")
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -91,6 +99,47 @@ func TestHTTPForwardingAndStableReservation(t *testing.T) {
 	}
 	if response.StatusCode != http.StatusOK || string(body) != "hello through tunnl: /working" || response.Header.Get("X-Target") != "reached" {
 		t.Fatalf("unexpected response: status=%d header=%q body=%q", response.StatusCode, response.Header.Get("X-Target"), body)
+	}
+	if got := response.Header.Get("X-Seen-Forwarded-For"); got == "198.51.100.9" || got == "" {
+		t.Fatalf("untrusted forwarding address reached target: %q", got)
+	}
+
+	healthRequest, err := http.NewRequest(http.MethodGet, "http://"+httpAddr+"/_tunnl/health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthRequest.Host = "stable-name.tunnl.test"
+	healthResponse, err := http.DefaultClient.Do(healthRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthBody, err := io.ReadAll(healthResponse.Body)
+	healthResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(healthBody); got != "hello through tunnl: /_tunnl/health" {
+		t.Fatalf("tunnel health path was intercepted: %q", got)
+	}
+
+	uploadCtx, cancelUpload := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelUpload()
+	uploadRequest, err := http.NewRequestWithContext(uploadCtx, http.MethodPost, "http://"+httpAddr+"/reject-upload", bytes.NewReader(make([]byte, 16<<20)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadRequest.Host = "stable-name.tunnl.test"
+	uploadResponse, err := http.DefaultClient.Do(uploadRequest)
+	if err != nil {
+		t.Fatalf("early upload response deadlocked: %v", err)
+	}
+	uploadBody, err := io.ReadAll(uploadResponse.Body)
+	uploadResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uploadResponse.StatusCode != http.StatusRequestEntityTooLarge || string(uploadBody) != "rejected" {
+		t.Fatalf("early upload response: status=%d body=%q", uploadResponse.StatusCode, uploadBody)
 	}
 
 	stopClient()
@@ -109,6 +158,74 @@ func TestHTTPForwardingAndStableReservation(t *testing.T) {
 			t.Fatalf("server shutdown: %v", err)
 		}
 	case <-time.After(5 * time.Second):
+		t.Fatal("server did not stop")
+	}
+}
+
+func TestHeartbeatTimeoutDisconnectsClient(t *testing.T) {
+	httpAddr := freeTCPAddr(t)
+	quicAddr := freeUDPAddr(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service, err := server.New(server.Config{
+		HTTPAddr:         httpAddr,
+		QUICAddr:         quicAddr,
+		BaseDomain:       "tunnl.test",
+		Database:         filepath.Join(t.TempDir(), "tunnl.db"),
+		AuthTokens:       []string{"integration-secret"},
+		HeartbeatTimeout: 200 * time.Millisecond,
+		Logger:           logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	serverCtx, stopServer := context.WithCancel(context.Background())
+	defer stopServer()
+	serverErrors := make(chan error, 1)
+	go func() { serverErrors <- service.Run(serverCtx) }()
+	waitForHealth(t, httpAddr)
+
+	target := targetURL(t, "http://127.0.0.1:3001")
+	clientCtx, stopClient := context.WithCancel(context.Background())
+	defer stopClient()
+	ready := make(chan protocol.Welcome, 1)
+	tunnel, err := client.New(client.Config{
+		Server:             quicAddr,
+		Token:              "integration-secret",
+		Domain:             "heartbeat-test",
+		Target:             target,
+		InsecureSkipVerify: true,
+		DisableState:       true,
+		Logger:             logger,
+		OnReady:            func(welcome protocol.Welcome) { ready <- welcome },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientErrors := make(chan error, 1)
+	go func() { clientErrors <- tunnel.Run(clientCtx) }()
+	select {
+	case <-ready:
+	case err := <-clientErrors:
+		t.Fatalf("client stopped before ready: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("client did not become ready")
+	}
+	select {
+	case err := <-clientErrors:
+		if err == nil {
+			t.Fatal("heartbeat timeout closed client without a reconnectable error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("client remained connected after heartbeat timeout")
+	}
+	stopServer()
+	select {
+	case err := <-serverErrors:
+		if err != nil {
+			t.Fatalf("server shutdown: %v", err)
+		}
+	case <-time.After(3 * time.Second):
 		t.Fatal("server did not stop")
 	}
 }
