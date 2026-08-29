@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -28,6 +29,18 @@ func (s *Server) Status(ctx context.Context) (admin.Status, error) {
 		return admin.Status{}, err
 	}
 	sessions := s.registry.snapshot()
+	latest, runtimeValue := s.metrics.latest()
+	diskTotal, diskFree := diskSpace(s.config.Database)
+	certificate := admin.CertificateStatus{Mode: "unavailable", State: "unavailable"}
+	if s.certificateSource != nil {
+		value := s.certificateSource.Status()
+		certificate = admin.CertificateStatus{
+			Mode: value.Mode, State: value.State, Provider: value.Provider, Staging: value.Staging,
+			Names: value.Names, Issuer: value.Issuer, Serial: value.Serial,
+			NotBefore: optionalTime(value.NotBefore), NotAfter: optionalTime(value.NotAfter), RenewalWindowStart: optionalTime(value.RenewalWindowStart),
+			LastEvent: value.LastEvent, LastEventAt: optionalTime(value.LastEventAt), LastError: value.LastError,
+		}
+	}
 	tunnels := make([]admin.Tunnel, 0, len(sessions))
 	for _, value := range sessions {
 		tunnels = append(tunnels, admin.Tunnel{Domain: value.domain, Remote: value.remote, ConnectedAt: value.connectedAt})
@@ -45,7 +58,29 @@ func (s *Server) Status(ctx context.Context) (admin.Status, error) {
 		TotalRequests:    s.metrics.totalRequests.Load(),
 		FailedRequests:   s.metrics.failedRequests.Load(),
 		ResponseBytes:    s.metrics.responseBytes.Load(),
-		Tunnels:          tunnels,
+		System: admin.SystemStatus{
+			CPUPercent: latest.CPUPercent, HeapBytes: runtimeValue.heapBytes, RuntimeBytes: runtimeValue.systemBytes,
+			Goroutines: runtimeValue.goroutines, GCCycles: runtimeValue.gcCycles,
+			DatabaseBytes: databaseBytes(s.config.Database), DiskTotalBytes: diskTotal, DiskFreeBytes: diskFree,
+			NumCPU: runtime.NumCPU(), GoVersion: runtime.Version(),
+		},
+		Certificate: certificate,
+		Tunnels:     tunnels,
+	}, nil
+}
+
+func optionalTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
+}
+
+func (s *Server) Metrics(context.Context) (admin.Metrics, error) {
+	return admin.Metrics{
+		WindowSeconds:         int64(metricSampleInterval.Seconds()) * metricHistoryLimit,
+		SampleIntervalSeconds: int64(metricSampleInterval.Seconds()),
+		Samples:               s.metrics.snapshots(),
 	}, nil
 }
 

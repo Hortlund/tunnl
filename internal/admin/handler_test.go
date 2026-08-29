@@ -14,8 +14,9 @@ const testAdminToken = "this-is-a-long-test-admin-token-1234567890"
 
 type fakeBackend struct{}
 
-func (fakeBackend) Status(context.Context) (Status, error)  { return Status{Version: "0.1.0"}, nil }
-func (fakeBackend) Tokens(context.Context) ([]Token, error) { return []Token{}, nil }
+func (fakeBackend) Status(context.Context) (Status, error)   { return Status{Version: "0.1.0"}, nil }
+func (fakeBackend) Metrics(context.Context) (Metrics, error) { return Metrics{}, nil }
+func (fakeBackend) Tokens(context.Context) ([]Token, error)  { return []Token{}, nil }
 func (fakeBackend) CreateToken(_ context.Context, label string) (CreatedToken, error) {
 	return CreatedToken{Token: Token{ID: "one", Label: label}, Secret: "tnl_secret"}, nil
 }
@@ -58,6 +59,21 @@ func TestHandlerBearerAuthentication(t *testing.T) {
 	var status Status
 	if err := json.NewDecoder(response.Body).Decode(&status); err != nil || status.Version != "0.1.0" {
 		t.Fatalf("status = %#v, %v", status, err)
+	}
+}
+
+func TestMetricsEndpointUsesBearerAuthentication(t *testing.T) {
+	t.Parallel()
+	handler, err := NewHandler(testAdminToken, fakeBackend{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/metrics", nil)
+	request.Header.Set("Authorization", "Bearer "+testAdminToken)
+	response := httptest.NewRecorder()
+	handler.Routes().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("metrics response = %d: %s", response.Code, response.Body.String())
 	}
 }
 

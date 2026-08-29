@@ -23,7 +23,7 @@ func runAdmin(args []string) error {
 	}
 	command := flags.Args()
 	if len(command) == 0 {
-		return errors.New("admin command required: status, tokens, or dns")
+		return errors.New("admin command required: status, metrics, tokens, or dns")
 	}
 	client, err := admin.NewClient(*adminURL, *adminToken)
 	if err != nil {
@@ -41,9 +41,26 @@ func runAdmin(args []string) error {
 			return printJSON(status)
 		}
 		fmt.Printf("tunnld %s\nstatus: operational\nuptime: %s\nactive tunnels: %d\nreservations: %d\nrequests: %d (%d failed)\n", status.Version, time.Duration(status.UptimeSeconds)*time.Second, status.ActiveTunnels, status.Reservations, status.TotalRequests, status.FailedRequests)
+		fmt.Printf("process: %.1f%% CPU, %s heap, %d goroutines\nstorage: %s database, %s free\n", status.System.CPUPercent, formatAdminBytes(status.System.HeapBytes), status.System.Goroutines, formatAdminBytes(uint64(status.System.DatabaseBytes)), formatAdminBytes(status.System.DiskFreeBytes))
+		fmt.Printf("certificate: %s (%s), expires %s, renewal window %s\n", status.Certificate.State, status.Certificate.Mode, formatAdminTime(status.Certificate.NotAfter), formatAdminTime(status.Certificate.RenewalWindowStart))
 		for _, tunnel := range status.Tunnels {
 			fmt.Printf("  %s.%s  %s  connected %s\n", tunnel.Domain, status.BaseDomain, tunnel.Remote, tunnel.ConnectedAt.Local().Format(time.RFC3339))
 		}
+		return nil
+	case "metrics":
+		metrics, err := client.Metrics(ctx)
+		if err != nil {
+			return err
+		}
+		if *jsonOutput {
+			return printJSON(metrics)
+		}
+		if len(metrics.Samples) == 0 {
+			fmt.Println("no metric samples collected yet")
+			return nil
+		}
+		latest := metrics.Samples[len(metrics.Samples)-1]
+		fmt.Printf("window: %s (%d samples)\nrequests: %.2f/s\nfailures: %.2f/s\nresponse traffic: %s/s\nactive tunnels: %d\nprocess CPU: %.1f%%\nheap: %s\ngoroutines: %d\n", time.Duration(metrics.WindowSeconds)*time.Second, len(metrics.Samples), latest.RequestsPerSecond, latest.FailuresPerSecond, formatAdminBytes(uint64(latest.BytesPerSecond)), latest.ActiveTunnels, latest.CPUPercent, formatAdminBytes(latest.HeapBytes), latest.Goroutines)
 		return nil
 	case "tokens":
 		return runAdminTokens(ctx, client, command[1:], *jsonOutput)
@@ -52,6 +69,27 @@ func runAdmin(args []string) error {
 	default:
 		return fmt.Errorf("unknown admin command %q", command[0])
 	}
+}
+
+func formatAdminBytes(value uint64) string {
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
+	amount := float64(value)
+	unit := 0
+	for amount >= 1024 && unit < len(units)-1 {
+		amount /= 1024
+		unit++
+	}
+	if unit == 0 {
+		return fmt.Sprintf("%d %s", value, units[unit])
+	}
+	return fmt.Sprintf("%.1f %s", amount, units[unit])
+}
+
+func formatAdminTime(value *time.Time) string {
+	if value == nil || value.IsZero() {
+		return "unavailable"
+	}
+	return value.Local().Format(time.RFC3339)
 }
 
 func runAdminTokens(ctx context.Context, client *admin.Client, args []string, jsonOutput bool) error {

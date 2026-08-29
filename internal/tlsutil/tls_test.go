@@ -29,6 +29,29 @@ func TestNewSourceGeneratesDevelopmentWildcard(t *testing.T) {
 	if err := certificate.VerifyHostname("demo.tunnl.test"); err != nil {
 		t.Fatalf("development wildcard does not cover tunnel hostname: %v", err)
 	}
+	status := source.Status()
+	if status.Mode != "development" || status.State != "valid" || status.NotAfter.IsZero() || status.RenewalWindowStart.IsZero() {
+		t.Fatalf("unexpected certificate status: %#v", status)
+	}
+}
+
+func TestSourceTracksCertificateEvents(t *testing.T) {
+	t.Parallel()
+	source := &Source{}
+	if err := source.onEvent(context.Background(), "cert_failed", map[string]any{"error": "challenge failed"}); err != nil {
+		t.Fatal(err)
+	}
+	status := source.Status()
+	if status.LastEvent != "cert_failed" || status.LastError != "challenge failed" {
+		t.Fatalf("event status = %#v", status)
+	}
+	if err := source.onEvent(context.Background(), "cert_obtained", nil); err != nil {
+		t.Fatal(err)
+	}
+	status = source.Status()
+	if status.LastEvent != "cert_obtained" || status.LastError != "" {
+		t.Fatalf("recovery status = %#v", status)
+	}
 }
 
 func TestNewSourceRejectsIncompleteManualCertificate(t *testing.T) {

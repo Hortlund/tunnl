@@ -39,6 +39,12 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	return result, err
 }
 
+func (c *Client) Metrics(ctx context.Context) (Metrics, error) {
+	var result Metrics
+	err := c.do(ctx, http.MethodGet, "/api/v1/metrics", nil, &result)
+	return result, err
+}
+
 func (c *Client) Tokens(ctx context.Context) ([]Token, error) {
 	var result []Token
 	err := c.do(ctx, http.MethodGet, "/api/v1/tokens", nil, &result)

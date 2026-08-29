@@ -15,7 +15,7 @@ The `tunnld admin` CLI calls the same API used by the panel. Business operations
 
 Managed client token secrets are generated with the operating system's cryptographic random source, returned once, and stored only as SHA-256 hashes in SQLite. Revocation removes the token and closes its active QUIC sessions. Environment-provided client tokens remain available as bootstrap credentials and are never exposed through the admin API.
 
-Metrics are process-local counters plus durable counts from SQLite. They do not participate in request forwarding.
+Metrics are process-local counters plus durable counts from SQLite. A bounded 30-minute in-memory ring records five-second request, failure, response-byte, tunnel, process CPU, heap, and goroutine samples. The status surface also reports Go runtime, SQLite/WAL, filesystem, and current TLS certificate lifecycle information. Certificate state is read from the same live source used by the HTTPS and QUIC listeners, including CertMagic issuance and renewal events. Telemetry does not participate in request forwarding and is never written to SQLite.
 
 DNS remains provider-agnostic. Manual wildcard DNS is the default. The optional Cloudflare provider reconciles only the wildcard public record and DNS-only relay record, marks owned records with a comment, and refuses to overwrite records it did not create. The Cloudflare credential is supplied at server startup and is never persisted or returned by the API.
 
@@ -24,6 +24,7 @@ DNS remains provider-agnostic. Manual wildcard DNS is the default. The optional 
 - The admin panel adds no runtime service and no JavaScript build chain.
 - Admin availability does not affect public forwarding.
 - Process-local counters reset when `tunnld` restarts.
+- Time-series telemetry uses fixed memory and has no external metrics service or frontend chart dependency.
 - Browser sessions reset on restart and expire after 12 hours.
 - Remote administration requires an operator-provided secure transport such as an SSH tunnel or TLS reverse proxy.
 - Cloudflare reconciliation is explicit rather than part of tunnel connection handling, so provider outages cannot disconnect or block tunnels.

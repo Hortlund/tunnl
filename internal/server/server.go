@@ -53,12 +53,13 @@ type Config struct {
 }
 
 type Server struct {
-	config   Config
-	store    *store.Store
-	registry *registry
-	metrics  *metrics
-	logger   *slog.Logger
-	admin    http.Handler
+	config            Config
+	store             *store.Store
+	registry          *registry
+	metrics           *metrics
+	logger            *slog.Logger
+	admin             http.Handler
+	certificateSource *tlsutil.Source
 }
 
 func New(config Config) (*Server, error) {
@@ -142,6 +143,11 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("configure TLS certificate: %w", err)
 	}
 	defer certificateSource.Close()
+	s.certificateSource = certificateSource
+	metricsCtx, stopMetrics := context.WithCancel(ctx)
+	defer stopMetrics()
+	s.metrics.sample(s.registry.count())
+	go s.sampleMetrics(metricsCtx)
 	if certificateSource.Generated() {
 		s.logger.Warn("using an ephemeral self-signed development certificate")
 	}
@@ -207,6 +213,19 @@ func (s *Server) Run(ctx context.Context) error {
 			return nil
 		}
 		return runErr
+	}
+}
+
+func (s *Server) sampleMetrics(ctx context.Context) {
+	ticker := time.NewTicker(metricSampleInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.metrics.sample(s.registry.count())
+		}
 	}
 }
 
