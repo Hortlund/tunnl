@@ -136,7 +136,7 @@ export TUNNL_ADMIN_TOKEN="$(tunnld generate-admin-token)"
 tunnld --admin-addr 127.0.0.1:9090 --admin-token "$TUNNL_ADMIN_TOKEN"
 ```
 
-Open `http://127.0.0.1:9090` and sign in with the admin token. The panel shows live tunnel and request metrics, active connections, durable reservations, managed client tokens, and DNS settings. Metrics counters reset when the server restarts.
+Open `http://127.0.0.1:9090` and sign in with the admin token. The panel shows 30 minutes of live request, failure, bandwidth, tunnel, and process CPU graphs; Go runtime, storage, and SQLite usage; certificate expiry and renewal state; active connections; durable reservations; managed client tokens; and DNS settings. Telemetry is held in a bounded in-memory buffer and resets when the server restarts.
 
 Every panel operation is also available through the server CLI:
 
@@ -144,6 +144,8 @@ Every panel operation is also available through the server CLI:
 export TUNNL_ADMIN_URL=http://127.0.0.1:9090
 
 tunnld admin status
+tunnld admin metrics
+tunnld admin --json metrics
 tunnld admin tokens list
 tunnld admin tokens create --label andy-laptop
 tunnld admin tokens revoke --id TOKEN_ID

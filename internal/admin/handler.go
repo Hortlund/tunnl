@@ -23,6 +23,7 @@ var webFiles embed.FS
 
 type Backend interface {
 	Status(context.Context) (Status, error)
+	Metrics(context.Context) (Metrics, error)
 	Tokens(context.Context) ([]Token, error)
 	CreateToken(context.Context, string) (CreatedToken, error)
 	RevokeToken(context.Context, string) error
@@ -76,6 +77,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /assets/app.js", h.asset("web/app.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /", h.requireAuth(h.indexPage))
 	mux.HandleFunc("GET /api/v1/status", h.requireAuth(h.status))
+	mux.HandleFunc("GET /api/v1/metrics", h.requireAuth(h.metrics))
 	mux.HandleFunc("GET /api/v1/tokens", h.requireAuth(h.tokens))
 	mux.HandleFunc("POST /api/v1/tokens", h.requireAuth(h.createToken))
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", h.requireAuth(h.revokeToken))
@@ -202,6 +204,11 @@ func (h *Handler) asset(name, contentType string) http.HandlerFunc {
 
 func (h *Handler) status(writer http.ResponseWriter, request *http.Request) {
 	result, err := h.backend.Status(request.Context())
+	writeResult(writer, result, err)
+}
+
+func (h *Handler) metrics(writer http.ResponseWriter, request *http.Request) {
+	result, err := h.backend.Metrics(request.Context())
 	writeResult(writer, result, err)
 }
 

@@ -18,17 +18,59 @@
     <section class="overview" aria-labelledby="overview-title">
       <div class="section-heading">
         <div><p class="eyebrow">Live server</p><h1 id="overview-title">Overview</h1></div>
-        <div class="health"><span class="pulse"></span><span>Operational</span><span id="last-refresh" class="muted">connecting</span></div>
+        <div id="server-health" class="health"><span class="pulse"></span><span id="health-label">Operational</span><span id="last-refresh" class="muted">connecting</span></div>
       </div>
       <div class="metrics">
         <div class="metric"><span>Active tunnels</span><strong id="metric-active">—</strong></div>
+        <div class="metric"><span>Request rate</span><strong id="metric-request-rate">—</strong></div>
+        <div class="metric"><span>Error rate</span><strong id="metric-error-rate">—</strong></div>
+        <div class="metric"><span>Response rate</span><strong id="metric-byte-rate">—</strong></div>
         <div class="metric"><span>Total requests</span><strong id="metric-requests">—</strong></div>
-        <div class="metric"><span>Reservations</span><strong id="metric-reservations">—</strong></div>
-        <div class="metric"><span>Response traffic</span><strong id="metric-bytes">—</strong></div>
-        <div class="metric"><span>Failed requests</span><strong id="metric-failed">—</strong></div>
         <div class="metric"><span>Uptime</span><strong id="metric-uptime">—</strong></div>
       </div>
     </section>
+
+    <section class="data-section telemetry-section" aria-labelledby="traffic-title">
+      <div class="section-heading compact">
+        <div><p class="eyebrow">Last 30 minutes</p><h2 id="traffic-title">Traffic &amp; reliability</h2></div>
+        <span id="sample-count" class="muted">Collecting samples</span>
+      </div>
+      <div class="chart-grid">
+        <article class="chart" id="requests-chart"><div class="chart-head"><div><span>Requests</span><small><i class="legend request"></i>Throughput <i class="legend failure"></i>Failures</small></div><strong id="requests-chart-value">—</strong></div><div class="chart-plot"></div></article>
+        <article class="chart" id="bandwidth-chart"><div class="chart-head"><div><span>Response bandwidth</span><small>Bytes returned to visitors</small></div><strong id="bandwidth-chart-value">—</strong></div><div class="chart-plot"></div></article>
+        <article class="chart" id="tunnel-chart"><div class="chart-head"><div><span>Connected tunnels</span><small>Concurrent client sessions</small></div><strong id="tunnel-chart-value">—</strong></div><div class="chart-plot"></div></article>
+        <article class="chart" id="cpu-chart"><div class="chart-head"><div><span>Process CPU</span><small>Share of Go runtime capacity</small></div><strong id="cpu-chart-value">—</strong></div><div class="chart-plot"></div></article>
+      </div>
+    </section>
+
+    <div class="data-section operations-grid">
+      <section class="resource-pane" aria-labelledby="resources-title">
+        <div class="section-heading compact"><div><p class="eyebrow">Runtime</p><h2 id="resources-title">System resources</h2></div><span id="go-version" class="muted"></span></div>
+        <div class="resource-list">
+          <div><span>Go heap</span><strong id="resource-heap">—</strong></div>
+          <div><span>Runtime reserved</span><strong id="resource-runtime">—</strong></div>
+          <div><span>Goroutines</span><strong id="resource-goroutines">—</strong></div>
+          <div><span>GC cycles</span><strong id="resource-gc">—</strong></div>
+          <div><span>SQLite + WAL</span><strong id="resource-database">—</strong></div>
+          <div><span>Disk available</span><strong id="resource-disk">—</strong></div>
+          <div><span>CPU capacity</span><strong id="resource-cpus">—</strong></div>
+          <div><span>Reservations</span><strong id="metric-reservations">—</strong></div>
+        </div>
+      </section>
+      <section class="certificate-pane" aria-labelledby="certificate-title">
+        <div class="section-heading compact"><div><p class="eyebrow">Transport security</p><h2 id="certificate-title">Certificate</h2></div><span id="certificate-badge" class="status-badge">Checking</span></div>
+        <div class="certificate-subject" id="certificate-name">—</div>
+        <dl class="certificate-details">
+          <div><dt>Issuer</dt><dd id="certificate-issuer">—</dd></div>
+          <div><dt>Mode</dt><dd id="certificate-mode">—</dd></div>
+          <div><dt>Expires</dt><dd id="certificate-expires">—</dd></div>
+          <div><dt>Renewal window</dt><dd id="certificate-renewal">—</dd></div>
+          <div><dt>Last certificate event</dt><dd id="certificate-event">—</dd></div>
+          <div><dt>Serial</dt><dd id="certificate-serial">—</dd></div>
+        </dl>
+        <p id="certificate-error" class="certificate-error" hidden></p>
+      </section>
+    </div>
 
     <section class="data-section" aria-labelledby="tunnels-title">
       <div class="section-heading compact"><div><p class="eyebrow">Connections</p><h2 id="tunnels-title">Active tunnels</h2></div><span id="base-domain" class="muted"></span></div>

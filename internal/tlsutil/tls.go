@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/caddyserver/certmagic"
@@ -35,6 +36,29 @@ type Source struct {
 	magic       *certmagic.Config
 	cache       *certmagic.Cache
 	generated   bool
+	mode        string
+	baseDomain  string
+	staging     bool
+	mu          sync.RWMutex
+	lastEvent   string
+	lastEventAt time.Time
+	lastError   string
+}
+
+type Status struct {
+	Mode               string
+	State              string
+	Provider           string
+	Staging            bool
+	Names              []string
+	Issuer             string
+	Serial             string
+	NotBefore          time.Time
+	NotAfter           time.Time
+	RenewalWindowStart time.Time
+	LastEvent          string
+	LastEventAt        time.Time
+	LastError          string
 }
 
 func NewSource(ctx context.Context, options Options) (*Source, error) {
@@ -58,6 +82,7 @@ func NewSource(ctx context.Context, options Options) (*Source, error) {
 			return nil, fmt.Errorf("create ACME storage: %w", err)
 		}
 
+		source := &Source{mode: "acme", baseDomain: options.BaseDomain, staging: options.ACMEStaging}
 		var config *certmagic.Config
 		cache := certmagic.NewCache(certmagic.CacheOptions{
 			GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) {
@@ -66,6 +91,7 @@ func NewSource(ctx context.Context, options Options) (*Source, error) {
 		})
 		config = certmagic.New(cache, certmagic.Config{
 			Storage: &certmagic.FileStorage{Path: options.ACMEStorage},
+			OnEvent: source.onEvent,
 		})
 		ca := certmagic.LetsEncryptProductionCA
 		if options.ACMEStaging {
@@ -85,14 +111,20 @@ func NewSource(ctx context.Context, options Options) (*Source, error) {
 			cache.Stop()
 			return nil, fmt.Errorf("obtain wildcard certificate: %w", err)
 		}
-		return &Source{magic: config, cache: cache}, nil
+		source.magic = config
+		source.cache = cache
+		return source, nil
 	}
 
 	certificate, generated, err := LoadOrGenerate(options.CertPath, options.KeyPath, options.BaseDomain)
 	if err != nil {
 		return nil, err
 	}
-	return &Source{certificate: &certificate, generated: generated}, nil
+	mode := "manual"
+	if generated {
+		mode = "development"
+	}
+	return &Source{certificate: &certificate, generated: generated, mode: mode, baseDomain: options.BaseDomain}, nil
 }
 
 func (s *Source) TLSConfig(minVersion uint16, nextProtos ...string) *tls.Config {
@@ -108,6 +140,85 @@ func (s *Source) TLSConfig(minVersion uint16, nextProtos ...string) *tls.Config 
 func (s *Source) Generated() bool { return s.generated }
 
 func (s *Source) Managed() bool { return s.magic != nil }
+
+func (s *Source) Status() Status {
+	status := Status{Mode: s.mode, Staging: s.staging}
+	if s.magic != nil {
+		status.Provider = "Let's Encrypt"
+	}
+	s.mu.RLock()
+	status.LastEvent = s.lastEvent
+	status.LastEventAt = s.lastEventAt
+	status.LastError = s.lastError
+	s.mu.RUnlock()
+
+	certificate := s.certificate
+	if s.magic != nil {
+		managed, err := s.magic.GetCertificate(&tls.ClientHelloInfo{ServerName: "relay." + s.baseDomain})
+		if err != nil {
+			status.State = "unavailable"
+			if status.LastError == "" {
+				status.LastError = err.Error()
+			}
+			return status
+		}
+		certificate = managed
+	}
+	if certificate == nil || len(certificate.Certificate) == 0 {
+		status.State = "unavailable"
+		return status
+	}
+	leaf := certificate.Leaf
+	if leaf == nil {
+		var err error
+		leaf, err = x509.ParseCertificate(certificate.Certificate[0])
+		if err != nil {
+			status.State = "unavailable"
+			status.LastError = err.Error()
+			return status
+		}
+	}
+	status.Names = append([]string(nil), leaf.DNSNames...)
+	status.Issuer = leaf.Issuer.CommonName
+	status.Serial = leaf.SerialNumber.Text(16)
+	status.NotBefore = leaf.NotBefore.UTC()
+	status.NotAfter = leaf.NotAfter.UTC()
+	status.RenewalWindowStart = leaf.NotAfter.Add(-leaf.NotAfter.Sub(leaf.NotBefore) / 3).UTC()
+	now := time.Now()
+	switch {
+	case status.LastEvent == "cert_ocsp_revoked":
+		status.State = "revoked"
+	case status.LastEvent == "cert_obtaining":
+		status.State = "renewing"
+	case status.LastEvent == "cert_failed" && time.Since(status.LastEventAt) < 24*time.Hour:
+		status.State = "error"
+	case !now.Before(leaf.NotAfter):
+		status.State = "expired"
+	case !now.Before(status.RenewalWindowStart):
+		status.State = "renewal_due"
+	default:
+		status.State = "valid"
+	}
+	return status
+}
+
+func (s *Source) onEvent(_ context.Context, event string, data map[string]any) error {
+	switch event {
+	case "cert_obtaining", "cert_obtained", "cert_failed", "cert_ocsp_revoked", "cached_managed_cert":
+	default:
+		return nil
+	}
+	s.mu.Lock()
+	s.lastEvent = event
+	s.lastEventAt = time.Now().UTC()
+	if event == "cert_failed" {
+		s.lastError = fmt.Sprint(data["error"])
+	} else if event == "cert_obtained" || event == "cached_managed_cert" {
+		s.lastError = ""
+	}
+	s.mu.Unlock()
+	return nil
+}
 
 func (s *Source) Close() {
 	if s.cache != nil {
