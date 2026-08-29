@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{.CSRF}}">
+  <title>tunnl control</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark"></span><span>tunnl</span><span class="product-label">control</span></div>
+    <div class="topbar-right"><span id="server-version" class="version-label">—</span><button id="logout" class="button-quiet" type="button">Sign out</button></div>
+  </header>
+
+  <main class="workspace">
+    <section class="overview" aria-labelledby="overview-title">
+      <div class="section-heading">
+        <div><p class="eyebrow">Live server</p><h1 id="overview-title">Overview</h1></div>
+        <div class="health"><span class="pulse"></span><span>Operational</span><span id="last-refresh" class="muted">connecting</span></div>
+      </div>
+      <div class="metrics">
+        <div class="metric"><span>Active tunnels</span><strong id="metric-active">—</strong></div>
+        <div class="metric"><span>Total requests</span><strong id="metric-requests">—</strong></div>
+        <div class="metric"><span>Reservations</span><strong id="metric-reservations">—</strong></div>
+        <div class="metric"><span>Response traffic</span><strong id="metric-bytes">—</strong></div>
+        <div class="metric"><span>Failed requests</span><strong id="metric-failed">—</strong></div>
+        <div class="metric"><span>Uptime</span><strong id="metric-uptime">—</strong></div>
+      </div>
+    </section>
+
+    <section class="data-section" aria-labelledby="tunnels-title">
+      <div class="section-heading compact"><div><p class="eyebrow">Connections</p><h2 id="tunnels-title">Active tunnels</h2></div><span id="base-domain" class="muted"></span></div>
+      <div class="table-wrap">
+        <table><thead><tr><th>Domain</th><th>Remote address</th><th>Connected</th></tr></thead><tbody id="tunnel-rows"></tbody></table>
+        <p id="tunnels-empty" class="empty">No clients are connected.</p>
+      </div>
+    </section>
+
+    <section class="data-section" aria-labelledby="tokens-title">
+      <div class="section-heading compact">
+        <div><p class="eyebrow">Access</p><h2 id="tokens-title">Client tokens</h2></div>
+        <form id="token-form" class="inline-form"><label class="sr-only" for="token-label">Token label</label><input id="token-label" maxlength="80" placeholder="Token label" required><button type="submit">Create token</button></form>
+      </div>
+      <p class="section-note">Generated secrets are displayed once. Revoking a token immediately disconnects its active tunnels.</p>
+      <div class="table-wrap">
+        <table><thead><tr><th>Label</th><th>Prefix</th><th>Created</th><th>Last used</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="token-rows"></tbody></table>
+        <p id="tokens-empty" class="empty">No managed tokens yet. Startup tokens are not shown here.</p>
+      </div>
+    </section>
+
+    <section class="data-section dns-layout" aria-labelledby="dns-title">
+      <div><p class="eyebrow">Routing</p><h2 id="dns-title">DNS provider</h2><p class="section-note">Manual wildcard DNS has no runtime dependency. Cloudflare can reconcile the wildcard and relay records on demand.</p></div>
+      <form id="dns-form" class="settings-form">
+        <label for="dns-provider">Provider</label>
+        <select id="dns-provider"><option value="manual">Manual wildcard</option><option value="cloudflare">Cloudflare</option></select>
+        <label for="dns-zone">Zone</label>
+        <input id="dns-zone" placeholder="tunnl.at">
+        <label for="dns-target">Server IPv4 or IPv6</label>
+        <input id="dns-target" placeholder="203.0.113.10">
+        <div class="form-actions"><span id="dns-credential" class="muted"></span><button type="submit">Save</button><button id="dns-reconcile" class="button-secondary" type="button">Reconcile records</button></div>
+      </form>
+    </section>
+  </main>
+
+  <dialog id="secret-dialog">
+    <form method="dialog" class="dialog-content">
+      <p class="eyebrow">Created successfully</p><h2>Copy this token now</h2><p class="section-note">It cannot be retrieved again after this window closes.</p>
+      <div class="secret-line"><code id="created-secret"></code><button id="copy-secret" type="button">Copy</button></div>
+      <button class="button-secondary dialog-close" value="close">Done</button>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

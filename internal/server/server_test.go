@@ -1,7 +1,10 @@
 package server
 
 import (
+	"context"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +68,50 @@ func TestForwardingHeadersFromTrustedProxy(t *testing.T) {
 	addForwardingHeaders(request, true)
 	if got := request.Header.Get("X-Forwarded-For"); got != "198.51.100.9, 203.0.113.7" {
 		t.Fatalf("X-Forwarded-For = %q", got)
+	}
+}
+
+func TestAdminListenerDefaultsToLoopback(t *testing.T) {
+	t.Parallel()
+	_, err := New(Config{
+		HTTPAddr:   "127.0.0.1:0",
+		QUICAddr:   "127.0.0.1:0",
+		BaseDomain: "tunnl.test",
+		Database:   filepath.Join(t.TempDir(), "tunnl.db"),
+		AdminAddr:  ":9090",
+		AdminToken: strings.Repeat("a", 32),
+	})
+	if err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("remote admin listener error = %v", err)
+	}
+}
+
+func TestManagedClientTokenAuthenticationAndRevocation(t *testing.T) {
+	t.Parallel()
+	service, err := New(Config{
+		HTTPAddr:   "127.0.0.1:0",
+		QUICAddr:   "127.0.0.1:0",
+		BaseDomain: "tunnl.test",
+		Database:   filepath.Join(t.TempDir(), "tunnl.db"),
+		AdminAddr:  "127.0.0.1:9090",
+		AdminToken: strings.Repeat("a", 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	ctx := context.Background()
+	created, err := service.CreateToken(ctx, "test client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !service.authenticate(ctx, created.Secret) {
+		t.Fatal("managed client token was rejected")
+	}
+	if err := service.RevokeToken(ctx, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if service.authenticate(ctx, created.Secret) {
+		t.Fatal("revoked managed client token was accepted")
 	}
 }
