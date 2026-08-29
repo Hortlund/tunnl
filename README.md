@@ -172,7 +172,7 @@ make test-race
 make lint
 ```
 
-Releases are made by pushing a semantic version tag. GoReleaser publishes cross-platform client binaries, while the release workflow publishes a multi-architecture server image.
+Releases are published from GitHub's **Releases** page using a `v`-prefixed semantic version tag such as `v0.1.0`. Publishing the release triggers GoReleaser to attach cross-platform client binaries and publishes the multi-architecture server image as `ghcr.io/hortlund/tunnl-server:v0.1.0`. The exact release tag is embedded in both `tunnl --version` and `tunnld --version`; stable releases also update the `latest` image tag.
 
 ## License
 
