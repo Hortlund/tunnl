@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,6 +219,80 @@ func TestHeartbeatTimeoutDisconnectsClient(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("client remained connected after heartbeat timeout")
+	}
+	stopServer()
+	select {
+	case err := <-serverErrors:
+		if err != nil {
+			t.Fatalf("server shutdown: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("server did not stop")
+	}
+}
+
+func TestManagedTokenConnectsAndRevocationDisconnects(t *testing.T) {
+	httpAddr := freeTCPAddr(t)
+	quicAddr := freeUDPAddr(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service, err := server.New(server.Config{
+		HTTPAddr:   httpAddr,
+		QUICAddr:   quicAddr,
+		BaseDomain: "tunnl.test",
+		Database:   filepath.Join(t.TempDir(), "tunnl.db"),
+		AdminAddr:  "127.0.0.1:0",
+		AdminToken: strings.Repeat("a", 32),
+		Logger:     logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	created, err := service.CreateToken(context.Background(), "integration client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCtx, stopServer := context.WithCancel(context.Background())
+	defer stopServer()
+	serverErrors := make(chan error, 1)
+	go func() { serverErrors <- service.Run(serverCtx) }()
+	waitForHealth(t, httpAddr)
+
+	clientCtx, stopClient := context.WithCancel(context.Background())
+	defer stopClient()
+	ready := make(chan protocol.Welcome, 1)
+	tunnel, err := client.New(client.Config{
+		Server:             quicAddr,
+		Token:              created.Secret,
+		Domain:             "managed-token",
+		Target:             targetURL(t, "http://127.0.0.1:3001"),
+		InsecureSkipVerify: true,
+		DisableState:       true,
+		Logger:             logger,
+		OnReady:            func(welcome protocol.Welcome) { ready <- welcome },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientErrors := make(chan error, 1)
+	go func() { clientErrors <- tunnel.Run(clientCtx) }()
+	select {
+	case <-ready:
+	case err := <-clientErrors:
+		t.Fatalf("managed-token client stopped before ready: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("managed-token client did not become ready")
+	}
+	if err := service.RevokeToken(context.Background(), created.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-clientErrors:
+		if err == nil {
+			t.Fatal("revocation stopped client without an error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("revocation did not disconnect client")
 	}
 	stopServer()
 	select {

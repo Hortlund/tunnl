@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · tunnl control</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="login-page">
+  <main class="login-shell">
+    <div class="brand"><span class="brand-mark"></span><span>tunnl</span></div>
+    <section class="login-panel">
+      <p class="eyebrow">Server control</p>
+      <h1>Operator access</h1>
+      <p class="muted">Enter the admin token configured on this server.</p>
+      {{if .Error}}<p class="form-error">That token was not accepted.</p>{{end}}
+      <form method="post" action="/login">
+        <label for="token">Admin token</label>
+        <input id="token" name="token" type="password" required autocomplete="current-password" autofocus>
+        <button type="submit">Continue</button>
+      </form>
+    </section>
+    <p class="login-foot">This panel is intentionally disabled unless <code>--admin-addr</code> is set.</p>
+  </main>
+</body>
+</html>

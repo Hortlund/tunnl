@@ -17,7 +17,7 @@ COPY --from=build /out/tunnld /usr/local/bin/tunnld
 COPY --from=build --chown=65532:65532 /out/data /data
 USER 65532:65532
 VOLUME ["/data"]
-EXPOSE 8080/tcp 8443/tcp 8443/udp
+EXPOSE 8080/tcp 8443/tcp 8443/udp 9090/tcp
 ENV TUNNL_DATABASE=/data/tunnl.db
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/usr/local/bin/tunnld", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/tunnld"]

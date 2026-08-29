@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Hortlund/tunnl/internal/admin"
 	"github.com/Hortlund/tunnl/internal/server"
 	"github.com/Hortlund/tunnl/internal/version"
 )
@@ -29,6 +30,17 @@ func run() error {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		return healthcheck()
 	}
+	if len(os.Args) > 1 && os.Args[1] == "admin" {
+		return runAdmin(os.Args[2:])
+	}
+	if len(os.Args) > 1 && os.Args[1] == "generate-admin-token" {
+		token, err := admin.GenerateAdminToken()
+		if err != nil {
+			return err
+		}
+		fmt.Println(token)
+		return nil
+	}
 	flags := flag.NewFlagSet("tunnld", flag.ContinueOnError)
 	httpAddr := flags.String("http-addr", envOr("TUNNL_HTTP_ADDR", ":8080"), "public HTTP listen address")
 	httpsAddr := flags.String("https-addr", envOr("TUNNL_HTTPS_ADDR", ":8443"), "public HTTPS listen address")
@@ -39,6 +51,10 @@ func run() error {
 	authTokens := flags.String("auth-tokens", os.Getenv("TUNNL_AUTH_TOKENS"), "comma-separated client tokens (or TUNNL_AUTH_TOKENS)")
 	tlsCert := flags.String("tls-cert", os.Getenv("TUNNL_TLS_CERT"), "TLS certificate path")
 	tlsKey := flags.String("tls-key", os.Getenv("TUNNL_TLS_KEY"), "TLS private key path")
+	adminAddr := flags.String("admin-addr", os.Getenv("TUNNL_ADMIN_ADDR"), "optional admin UI/API listen address")
+	adminToken := flags.String("admin-token", os.Getenv("TUNNL_ADMIN_TOKEN"), "admin UI/API authentication token")
+	adminAllowRemote := flags.Bool("admin-allow-remote", envBool("TUNNL_ADMIN_ALLOW_REMOTE", false), "allow the admin listener to bind beyond loopback")
+	cloudflareAPIToken := flags.String("cloudflare-api-token", os.Getenv("TUNNL_CLOUDFLARE_API_TOKEN"), "Cloudflare DNS API token")
 	publicPort := flags.Int("public-port", envInt("TUNNL_PUBLIC_PORT", 8443), "HTTPS port included in generated URLs")
 	trustProxyHeaders := flags.Bool("trust-proxy-headers", envBool("TUNNL_TRUST_PROXY_HEADERS", false), "trust forwarding headers from the ingress proxy")
 	heartbeatTimeout := flags.Duration("heartbeat-timeout", envDuration("TUNNL_HEARTBEAT_TIMEOUT", 40*time.Second), "maximum time between client heartbeats")
@@ -59,18 +75,22 @@ func run() error {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	service, err := server.New(server.Config{
-		HTTPAddr:          *httpAddr,
-		HTTPSAddr:         *httpsAddr,
-		QUICAddr:          *quicAddr,
-		BaseDomain:        *baseDomain,
-		PublicPort:        *publicPort,
-		Database:          *database,
-		AuthTokens:        tokens,
-		TrustProxyHeaders: *trustProxyHeaders,
-		HeartbeatTimeout:  *heartbeatTimeout,
-		TLSCert:           *tlsCert,
-		TLSKey:            *tlsKey,
-		Logger:            logger,
+		HTTPAddr:           *httpAddr,
+		HTTPSAddr:          *httpsAddr,
+		QUICAddr:           *quicAddr,
+		BaseDomain:         *baseDomain,
+		PublicPort:         *publicPort,
+		Database:           *database,
+		AuthTokens:         tokens,
+		TrustProxyHeaders:  *trustProxyHeaders,
+		HeartbeatTimeout:   *heartbeatTimeout,
+		TLSCert:            *tlsCert,
+		TLSKey:             *tlsKey,
+		AdminAddr:          *adminAddr,
+		AdminToken:         *adminToken,
+		AdminAllowRemote:   *adminAllowRemote,
+		CloudflareAPIToken: *cloudflareAPIToken,
+		Logger:             logger,
 	})
 	if err != nil {
 		return err

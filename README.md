@@ -119,11 +119,64 @@ Open these firewall ports:
 
 Back up the `tunnl-data` Docker volume. SQLite uses WAL mode with full synchronous durability.
 
+## Optional admin panel
+
+The admin panel is embedded in `tunnld` and has no separate frontend runtime. It is disabled unless an admin address is configured. Generate a dedicated admin token and bind the panel to loopback:
+
+```bash
+export TUNNL_ADMIN_TOKEN="$(tunnld generate-admin-token)"
+tunnld --admin-addr 127.0.0.1:9090 --admin-token "$TUNNL_ADMIN_TOKEN"
+```
+
+Open `http://127.0.0.1:9090` and sign in with the admin token. The panel shows live tunnel and request metrics, active connections, durable reservations, managed client tokens, and DNS settings. Metrics counters reset when the server restarts.
+
+Every panel operation is also available through the server CLI:
+
+```bash
+export TUNNL_ADMIN_URL=http://127.0.0.1:9090
+
+tunnld admin status
+tunnld admin tokens list
+tunnld admin tokens create --label andy-laptop
+tunnld admin tokens revoke --id TOKEN_ID
+tunnld admin dns show
+tunnld admin dns set --provider manual
+```
+
+Generated client secrets are displayed once and stored only as hashes. Revoking one immediately closes its active tunnels. Tokens supplied through `TUNNL_AUTH_TOKENS` remain bootstrap credentials and are intentionally not manageable through the panel.
+
+The admin listener rejects non-loopback binds by default. For remote operation, put it behind an SSH tunnel or a TLS-authenticated reverse proxy. Do not send the admin token over unencrypted public HTTP. `--admin-allow-remote` is available for explicitly protected networks and container port mappings.
+
+For Docker Compose, the admin port is mapped only to the host's loopback interface. Enable the listener inside the container with:
+
+```bash
+export TUNNL_ADMIN_ADDR=:9090
+export TUNNL_ADMIN_ALLOW_REMOTE=true
+export TUNNL_ADMIN_TOKEN="$(tunnld generate-admin-token)"
+docker compose up -d
+```
+
+### Cloudflare DNS reconciliation
+
+Manual wildcard DNS remains the default and has no provider API dependency. To let tunnl manage the baseline Cloudflare records, give the server a scoped API token with **Zone Read** and **DNS Write** access, then save and reconcile the provider configuration:
+
+```bash
+export TUNNL_CLOUDFLARE_API_TOKEN='scoped-cloudflare-token'
+
+tunnld admin dns set \
+  --provider cloudflare \
+  --zone tunnl.at \
+  --target 203.0.113.10
+tunnld admin dns reconcile
+```
+
+Reconciliation creates or updates `*.tunnl.at` as a proxied record and `relay.tunnl.at` as DNS-only. tunnl marks its records and refuses to overwrite records it does not own. The Cloudflare token stays in server memory and is never written to SQLite or returned to the panel.
+
 ## Configuration
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
-| `TUNNL_AUTH_TOKENS` | required | Comma-separated client tokens accepted by `tunnld` |
+| `TUNNL_AUTH_TOKENS` | empty | Comma-separated bootstrap client tokens accepted by `tunnld` |
 | `TUNNL_BASE_DOMAIN` | `tunnl.at` | Public wildcard domain |
 | `TUNNL_DATABASE` | `.data/tunnl.db` | SQLite database path |
 | `TUNNL_HTTP_ADDR` | `:8080` | Public HTTP listener |
@@ -137,6 +190,11 @@ Back up the `tunnl-data` Docker volume. SQLite uses WAL mode with full synchrono
 | `TUNNL_RESPONSE_HEADER_TIMEOUT` | `0` | Maximum wait for local response headers; zero disables it |
 | `TUNNL_TRUST_PROXY_HEADERS` | `false` | Preserve forwarding headers from a trusted ingress proxy |
 | `TUNNL_HEARTBEAT_TIMEOUT` | `40s` | Maximum delay between client heartbeats before disconnecting |
+| `TUNNL_ADMIN_ADDR` | empty | Optional admin UI/API listener; empty disables it |
+| `TUNNL_ADMIN_TOKEN` | required with admin | Admin UI/API authentication token of at least 32 characters |
+| `TUNNL_ADMIN_ALLOW_REMOTE` | `false` | Permit an explicitly protected non-loopback admin bind |
+| `TUNNL_ADMIN_URL` | `http://127.0.0.1:9090` | Admin API URL used by `tunnld admin` commands |
+| `TUNNL_CLOUDFLARE_API_TOKEN` | empty | Optional scoped credential used only for DNS reconciliation |
 
 Generate separate high-entropy tokens for each person. A domain reservation belongs to the SHA-256 hash of the token that created it, so another client token cannot claim it.
 
@@ -157,10 +215,9 @@ Leave `TUNNL_TRUST_PROXY_HEADERS` disabled unless direct access to the origin is
 1. WebSocket-over-TLS fallback for networks that block UDP.
 2. Raw TCP forwarding using allocated public ports.
 3. WebSocket upgrade tunneling and expanded HTTP integration tests.
-4. Account-scoped token administration and token rotation.
-5. Rate limiting, Prometheus metrics, and abuse controls.
-6. User-owned custom domains and automated validation.
-7. PostgreSQL and multi-node routing if horizontal scaling becomes necessary.
+4. Rate limiting, Prometheus export, and abuse controls.
+5. User-owned custom domains and automated validation.
+6. PostgreSQL and multi-node routing if horizontal scaling becomes necessary.
 
 See [the architecture decision record](docs/architecture/0001-foundation.md) for the protocol and deployment rationale.
 

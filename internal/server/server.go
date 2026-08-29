@@ -20,6 +20,7 @@ import (
 
 	quic "github.com/quic-go/quic-go"
 
+	"github.com/Hortlund/tunnl/internal/admin"
 	"github.com/Hortlund/tunnl/internal/names"
 	"github.com/Hortlund/tunnl/internal/protocol"
 	"github.com/Hortlund/tunnl/internal/store"
@@ -29,36 +30,51 @@ import (
 var errTunnelOffline = errors.New("tunnel is offline")
 
 type Config struct {
-	HTTPAddr          string
-	HTTPSAddr         string
-	QUICAddr          string
-	BaseDomain        string
-	PublicPort        int
-	Database          string
-	AuthTokens        []string
-	TrustProxyHeaders bool
-	HeartbeatTimeout  time.Duration
-	TLSCert           string
-	TLSKey            string
-	Logger            *slog.Logger
+	HTTPAddr           string
+	HTTPSAddr          string
+	QUICAddr           string
+	BaseDomain         string
+	PublicPort         int
+	Database           string
+	AuthTokens         []string
+	TrustProxyHeaders  bool
+	HeartbeatTimeout   time.Duration
+	TLSCert            string
+	TLSKey             string
+	AdminAddr          string
+	AdminToken         string
+	AdminAllowRemote   bool
+	CloudflareAPIToken string
+	Logger             *slog.Logger
 }
 
 type Server struct {
 	config   Config
 	store    *store.Store
 	registry *registry
+	metrics  *metrics
 	logger   *slog.Logger
+	admin    http.Handler
 }
 
 func New(config Config) (*Server, error) {
-	if config.BaseDomain == "" || config.Database == "" || len(config.AuthTokens) == 0 {
-		return nil, errors.New("base domain, database, and at least one auth token are required")
+	if config.BaseDomain == "" || config.Database == "" {
+		return nil, errors.New("base domain and database are required")
 	}
 	if config.HTTPAddr == "" && config.HTTPSAddr == "" {
 		return nil, errors.New("at least one HTTP listener is required")
 	}
 	if config.QUICAddr == "" {
 		return nil, errors.New("QUIC address is required")
+	}
+	if config.AdminAddr != "" && !config.AdminAllowRemote {
+		host, _, err := net.SplitHostPort(config.AdminAddr)
+		if err != nil {
+			return nil, errors.New("admin address must include a host and port")
+		}
+		if host != "localhost" && (net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback()) {
+			return nil, errors.New("admin listener must bind to loopback unless --admin-allow-remote is set")
+		}
 	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
@@ -70,7 +86,25 @@ func New(config Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{config: config, store: database, registry: newRegistry(), logger: config.Logger}, nil
+	managedTokens, err := database.CountClientTokens(context.Background())
+	if err != nil {
+		database.Close()
+		return nil, fmt.Errorf("count client tokens: %w", err)
+	}
+	if len(config.AuthTokens) == 0 && managedTokens == 0 && config.AdminAddr == "" {
+		database.Close()
+		return nil, errors.New("at least one client token or an enabled admin listener is required")
+	}
+	service := &Server{config: config, store: database, registry: newRegistry(), metrics: newMetrics(), logger: config.Logger}
+	if config.AdminAddr != "" {
+		handler, err := admin.NewHandler(config.AdminToken, service, config.Logger)
+		if err != nil {
+			database.Close()
+			return nil, fmt.Errorf("configure admin listener: %w", err)
+		}
+		service.admin = handler.Routes()
+	}
+	return service, nil
 }
 
 func (s *Server) Close() error { return s.store.Close() }
@@ -103,6 +137,9 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.config.HTTPSAddr != "" {
 		servers = append(servers, &http.Server{Addr: s.config.HTTPSAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, TLSConfig: &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}})
 	}
+	if s.config.AdminAddr != "" {
+		servers = append(servers, &http.Server{Addr: s.config.AdminAddr, Handler: s.admin, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10})
+	}
 
 	errorsChannel := make(chan error, len(servers)+1)
 	go func() { errorsChannel <- s.acceptTunnels(ctx, listener) }()
@@ -117,9 +154,8 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
-	s.logger.Info("tunnl server started", "http", s.config.HTTPAddr, "https", s.config.HTTPSAddr, "quic", s.config.QUICAddr, "base_domain", s.config.BaseDomain)
-	select {
-	case <-ctx.Done():
+	s.logger.Info("tunnl server started", "http", s.config.HTTPAddr, "https", s.config.HTTPSAddr, "quic", s.config.QUICAddr, "admin", s.config.AdminAddr, "base_domain", s.config.BaseDomain)
+	shutdown := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		var group sync.WaitGroup
@@ -129,8 +165,13 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		_ = listener.Close()
 		group.Wait()
+	}
+	select {
+	case <-ctx.Done():
+		shutdown()
 		return nil
 	case runErr := <-errorsChannel:
+		shutdown()
 		if errors.Is(runErr, http.ErrServerClosed) || ctx.Err() != nil {
 			return nil
 		}
@@ -171,7 +212,7 @@ func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
 		_ = conn.CloseWithError(1, "incompatible protocol")
 		return
 	}
-	if !s.authenticate(hello.Token) {
+	if !s.authenticate(ctx, hello.Token) {
 		_ = encoder.Encode(protocol.Welcome{Error: "authentication failed"})
 		_ = conn.CloseWithError(1, "authentication failed")
 		return
@@ -198,8 +239,9 @@ func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
 		return
 	}
 
-	value := &session{domain: domain, conn: conn}
+	value := &session{domain: domain, tokenHash: tokenHash, remote: conn.RemoteAddr().String(), connectedAt: time.Now().UTC(), conn: conn}
 	s.registry.register(value)
+	s.metrics.totalConnections.Add(1)
 	defer s.registry.unregister(value)
 	publicURL := "https://" + domain + "." + s.config.BaseDomain
 	if s.config.PublicPort != 0 && s.config.PublicPort != 443 {
@@ -224,10 +266,18 @@ func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
 	}
 }
 
-func (s *Server) authenticate(token string) bool {
+func (s *Server) authenticate(ctx context.Context, token string) bool {
 	valid := 0
 	for _, candidate := range s.config.AuthTokens {
 		if constantTimeEqual(token, candidate) {
+			valid = 1
+		}
+	}
+	if valid == 0 {
+		matched, err := s.store.AuthenticateClientToken(ctx, hashToken(token))
+		if err != nil {
+			s.logger.Error("authenticate managed client token", "error", err)
+		} else if matched {
 			valid = 1
 		}
 	}
@@ -252,18 +302,22 @@ func (s *Server) health(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) proxy(writer http.ResponseWriter, request *http.Request) {
+	s.metrics.totalRequests.Add(1)
 	if request.Header.Get("Upgrade") != "" {
+		s.metrics.failedRequests.Add(1)
 		http.Error(writer, "protocol upgrades are not supported yet", http.StatusNotImplemented)
 		return
 	}
 	host := hostWithoutPort(request.Host)
 	suffix := "." + s.config.BaseDomain
 	if !strings.HasSuffix(strings.ToLower(host), suffix) {
+		s.metrics.failedRequests.Add(1)
 		http.Error(writer, "unknown tunnl host", http.StatusNotFound)
 		return
 	}
 	domain := strings.TrimSuffix(strings.ToLower(host), suffix)
 	if strings.Contains(domain, ".") {
+		s.metrics.failedRequests.Add(1)
 		http.Error(writer, "invalid tunnl host", http.StatusNotFound)
 		return
 	}
@@ -271,6 +325,7 @@ func (s *Server) proxy(writer http.ResponseWriter, request *http.Request) {
 	defer cancel()
 	stream, err := s.registry.open(streamCtx, domain)
 	if err != nil {
+		s.metrics.failedRequests.Add(1)
 		http.Error(writer, "tunnel is offline", http.StatusBadGateway)
 		return
 	}
@@ -296,6 +351,7 @@ func (s *Server) proxy(writer http.ResponseWriter, request *http.Request) {
 	go func() { requestWrite <- outgoing.Write(stream) }()
 	response, err := http.ReadResponse(bufio.NewReader(stream), outgoing)
 	if err != nil {
+		s.metrics.failedRequests.Add(1)
 		finishRequestWrite(request, stream, requestWrite)
 		http.Error(writer, "tunnel response failed", http.StatusBadGateway)
 		return
@@ -305,7 +361,10 @@ func (s *Server) proxy(writer http.ResponseWriter, request *http.Request) {
 	copyHeaders(writer.Header(), response.Header)
 	writer.Header().Set("Via", "tunnl")
 	writer.WriteHeader(response.StatusCode)
-	if _, err := io.Copy(writer, response.Body); err != nil {
+	written, err := io.Copy(writer, response.Body)
+	s.metrics.responseBytes.Add(uint64(written))
+	if err != nil {
+		s.metrics.failedRequests.Add(1)
 		s.logger.Debug("public response ended", "domain", domain, "error", err)
 	}
 }

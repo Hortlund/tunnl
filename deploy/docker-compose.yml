@@ -8,10 +8,15 @@ services:
       TUNNL_PUBLIC_PORT: "443"
       TUNNL_TLS_CERT: /certs/fullchain.pem
       TUNNL_TLS_KEY: /certs/privkey.pem
+      TUNNL_ADMIN_ADDR: "${TUNNL_ADMIN_ADDR:-}"
+      TUNNL_ADMIN_TOKEN: "${TUNNL_ADMIN_TOKEN:-}"
+      TUNNL_ADMIN_ALLOW_REMOTE: "${TUNNL_ADMIN_ALLOW_REMOTE:-false}"
+      TUNNL_CLOUDFLARE_API_TOKEN: "${TUNNL_CLOUDFLARE_API_TOKEN:-}"
     ports:
       - "80:8080/tcp"
       - "443:8443/tcp"
       - "443:8443/udp"
+      - "127.0.0.1:${TUNNL_ADMIN_PORT:-9090}:9090/tcp"
     volumes:
       - tunnl-data:/data
       - ./certs:/certs:ro
