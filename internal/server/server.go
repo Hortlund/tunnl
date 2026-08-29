@@ -41,6 +41,10 @@ type Config struct {
 	HeartbeatTimeout   time.Duration
 	TLSCert            string
 	TLSKey             string
+	ACMEEnabled        bool
+	ACMEEmail          string
+	ACMEStorage        string
+	ACMEStaging        bool
 	AdminAddr          string
 	AdminToken         string
 	AdminAllowRemote   bool
@@ -66,6 +70,20 @@ func New(config Config) (*Server, error) {
 	}
 	if config.QUICAddr == "" {
 		return nil, errors.New("QUIC address is required")
+	}
+	if config.ACMEEnabled {
+		if config.TLSCert != "" || config.TLSKey != "" {
+			return nil, errors.New("automatic ACME and manual TLS certificate files are mutually exclusive")
+		}
+		if config.ACMEEmail == "" {
+			return nil, errors.New("ACME account email is required when automatic ACME is enabled")
+		}
+		if config.ACMEStorage == "" {
+			return nil, errors.New("ACME storage path is required when automatic ACME is enabled")
+		}
+		if config.CloudflareAPIToken == "" {
+			return nil, errors.New("Cloudflare API token is required for ACME DNS-01")
+		}
 	}
 	if config.AdminAddr != "" && !config.AdminAllowRemote {
 		host, _, err := net.SplitHostPort(config.AdminAddr)
@@ -110,14 +128,27 @@ func New(config Config) (*Server, error) {
 func (s *Server) Close() error { return s.store.Close() }
 
 func (s *Server) Run(ctx context.Context) error {
-	certificate, generated, err := tlsutil.LoadOrGenerate(s.config.TLSCert, s.config.TLSKey, s.config.BaseDomain)
+	certificateSource, err := tlsutil.NewSource(ctx, tlsutil.Options{
+		CertPath:           s.config.TLSCert,
+		KeyPath:            s.config.TLSKey,
+		BaseDomain:         s.config.BaseDomain,
+		ACMEEnabled:        s.config.ACMEEnabled,
+		ACMEEmail:          s.config.ACMEEmail,
+		ACMEStorage:        s.config.ACMEStorage,
+		ACMEStaging:        s.config.ACMEStaging,
+		CloudflareAPIToken: s.config.CloudflareAPIToken,
+	})
 	if err != nil {
-		return fmt.Errorf("load TLS certificate: %w", err)
+		return fmt.Errorf("configure TLS certificate: %w", err)
 	}
-	if generated {
+	defer certificateSource.Close()
+	if certificateSource.Generated() {
 		s.logger.Warn("using an ephemeral self-signed development certificate")
 	}
-	quicTLS := &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13, NextProtos: []string{protocol.ALPN}}
+	if certificateSource.Managed() {
+		s.logger.Info("automatic Let's Encrypt wildcard certificate management enabled", "domain", "*."+s.config.BaseDomain, "staging", s.config.ACMEStaging)
+	}
+	quicTLS := certificateSource.TLSConfig(tls.VersionTLS13, protocol.ALPN)
 	listener, err := quic.ListenAddr(s.config.QUICAddr, quicTLS, &quic.Config{
 		HandshakeIdleTimeout: 10 * time.Second,
 		MaxIdleTimeout:       45 * time.Second,
@@ -135,7 +166,7 @@ func (s *Server) Run(ctx context.Context) error {
 		servers = append(servers, &http.Server{Addr: s.config.HTTPAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second})
 	}
 	if s.config.HTTPSAddr != "" {
-		servers = append(servers, &http.Server{Addr: s.config.HTTPSAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, TLSConfig: &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}})
+		servers = append(servers, &http.Server{Addr: s.config.HTTPSAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, TLSConfig: certificateSource.TLSConfig(tls.VersionTLS12)})
 	}
 	if s.config.AdminAddr != "" {
 		servers = append(servers, &http.Server{Addr: s.config.AdminAddr, Handler: s.admin, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10})

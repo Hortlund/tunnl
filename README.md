@@ -84,20 +84,28 @@ The server is published as `ghcr.io/hortlund/tunnl-server`. Client release archi
 
 ```bash
 cd deploy
-mkdir -p certs
 export TUNNL_AUTH_TOKENS='token-for-andy,token-for-another-user'
 export TUNNL_BASE_DOMAIN='tunnl.at'
+export TUNNL_ACME=true
+export TUNNL_ACME_EMAIL='operator@example.com'
+export TUNNL_CLOUDFLARE_API_TOKEN='scoped-cloudflare-token'
 docker compose up -d
 ```
 
-Place a publicly trusted wildcard certificate in:
+The production Compose file enables ACME by default. `tunnld` obtains `*.tunnl.at` from Let's Encrypt using a Cloudflare DNS-01 challenge, stores the account and certificate state in the persistent `tunnl-data` volume, and renews the certificate automatically. The same certificate secures public HTTPS and the direct QUIC relay. Test the setup against Let's Encrypt's untrusted staging environment first with `TUNNL_ACME_STAGING=true`, then disable staging for production.
+
+The Cloudflare API token needs **Zone Read** and **DNS Write** for only the relevant zone. It is used to create short-lived `_acme-challenge` TXT records during issuance and renewal. Certificate issuance does not create the wildcard or relay address records described below; configure those manually or use the optional DNS reconciler.
+
+To provide a certificate yourself instead, leave `TUNNL_ACME=false` and set `TUNNL_TLS_CERT=/certs/fullchain.pem` and `TUNNL_TLS_KEY=/certs/privkey.pem`. The Compose file mounts `deploy/certs` read-only for this fallback.
+
+A Cloudflare Origin CA certificate is not suitable here: the direct `relay.tunnl.at` QUIC endpoint needs a certificate trusted by client operating systems.
+
+Automatic ACME and manual certificate files are mutually exclusive. For the manual fallback, place the files in:
 
 ```text
 deploy/certs/fullchain.pem
 deploy/certs/privkey.pem
 ```
-
-A wildcard certificate from Let's Encrypt using a DNS-01 challenge is suitable. The direct `relay.tunnl.at` QUIC endpoint must use a certificate trusted by client operating systems; a Cloudflare Origin CA certificate alone is not sufficient for that endpoint.
 
 ### Cloudflare DNS
 
@@ -113,7 +121,7 @@ The wildcard means starting or stopping a tunnel never requires a Cloudflare API
 
 Open these firewall ports:
 
-- TCP 80 for HTTP and certificate redirects/challenges.
+- TCP 80 for optional plain HTTP ingress.
 - TCP 443 for public HTTPS traffic.
 - UDP 443 for direct QUIC client connections.
 
@@ -185,6 +193,10 @@ Reconciliation creates or updates `*.tunnl.at` as a proxied record and `relay.tu
 | `TUNNL_PUBLIC_PORT` | `8443` | Port included in generated URLs |
 | `TUNNL_TLS_CERT` | empty | TLS certificate; ephemeral development certificate when omitted |
 | `TUNNL_TLS_KEY` | empty | TLS private key |
+| `TUNNL_ACME` | `false` | Automatically obtain and renew a Let's Encrypt wildcard certificate through Cloudflare DNS-01 |
+| `TUNNL_ACME_EMAIL` | empty | Let's Encrypt ACME account email; required when ACME is enabled |
+| `TUNNL_ACME_STORAGE` | `.data/acme` | Persistent ACME account, key, and certificate storage |
+| `TUNNL_ACME_STAGING` | `false` | Use Let's Encrypt staging for a dry run; its certificates are not publicly trusted |
 | `TUNNL_SERVER` | `relay.tunnl.at:443` | Client relay address |
 | `TUNNL_TOKEN` | required | Client authentication token |
 | `TUNNL_RESPONSE_HEADER_TIMEOUT` | `0` | Maximum wait for local response headers; zero disables it |
@@ -194,7 +206,7 @@ Reconciliation creates or updates `*.tunnl.at` as a proxied record and `relay.tu
 | `TUNNL_ADMIN_TOKEN` | required with admin | Admin UI/API authentication token of at least 32 characters |
 | `TUNNL_ADMIN_ALLOW_REMOTE` | `false` | Permit an explicitly protected non-loopback admin bind |
 | `TUNNL_ADMIN_URL` | `http://127.0.0.1:9090` | Admin API URL used by `tunnld admin` commands |
-| `TUNNL_CLOUDFLARE_API_TOKEN` | empty | Optional scoped credential used only for DNS reconciliation |
+| `TUNNL_CLOUDFLARE_API_TOKEN` | empty | Scoped credential used for automatic ACME and optional DNS reconciliation |
 
 Generate separate high-entropy tokens for each person. A domain reservation belongs to the SHA-256 hash of the token that created it, so another client token cannot claim it.
 

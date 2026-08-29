@@ -5,9 +5,14 @@ services:
     environment:
       TUNNL_AUTH_TOKENS: "${TUNNL_AUTH_TOKENS:?set TUNNL_AUTH_TOKENS}"
       TUNNL_BASE_DOMAIN: "${TUNNL_BASE_DOMAIN:-tunnl.at}"
+      TUNNL_DATABASE: /data/tunnl.db
       TUNNL_PUBLIC_PORT: "443"
-      TUNNL_TLS_CERT: /certs/fullchain.pem
-      TUNNL_TLS_KEY: /certs/privkey.pem
+      TUNNL_ACME: "${TUNNL_ACME:-true}"
+      TUNNL_ACME_EMAIL: "${TUNNL_ACME_EMAIL:-}"
+      TUNNL_ACME_STORAGE: /data/acme
+      TUNNL_ACME_STAGING: "${TUNNL_ACME_STAGING:-false}"
+      TUNNL_TLS_CERT: "${TUNNL_TLS_CERT:-}"
+      TUNNL_TLS_KEY: "${TUNNL_TLS_KEY:-}"
       TUNNL_ADMIN_ADDR: "${TUNNL_ADMIN_ADDR:-}"
       TUNNL_ADMIN_TOKEN: "${TUNNL_ADMIN_TOKEN:-}"
       TUNNL_ADMIN_ALLOW_REMOTE: "${TUNNL_ADMIN_ALLOW_REMOTE:-false}"
