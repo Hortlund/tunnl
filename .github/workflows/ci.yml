@@ -12,7 +12,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26.x'
@@ -24,10 +24,17 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
         with:
           context: .
           push: false
           tags: tunnl-server:test
+          load: true
+          build-args: |
+            VERSION=ci-test
+            COMMIT=ci-test-commit
+            BUILD_DATE=2026-01-01T00:00:00Z
+      - name: Verify embedded server version
+        run: docker run --rm tunnl-server:test --version | grep -F 'tunnld ci-test (ci-test-commit, 2026-01-01T00:00:00Z)'

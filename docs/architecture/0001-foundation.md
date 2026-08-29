@@ -16,11 +16,15 @@ The project ships two commands from one Go module:
 
 Clients establish an outbound TLS 1.3 QUIC connection to the server. The first bidirectional stream carries a versioned JSON handshake and heartbeats. The server opens a new independent bidirectional stream for each public HTTP request. HTTP/1.1 wire encoding is used inside each QUIC stream, which preserves streaming semantics without inventing a body framing protocol.
 
+Request upload and response download use the two directions of a QUIC stream concurrently. This allows a local service to reject or answer a request before the public caller finishes uploading its body. A heartbeat failure closes the whole QUIC connection so the client can reconnect rather than remaining attached to an unregistered session.
+
 The server routes requests by the first label of the HTTP Host header. A wildcard DNS record directs every name under the configured base domain to the server. Starting and stopping tunnels changes only the in-memory connection registry; it does not mutate DNS.
 
 SQLite stores durable name-to-token reservations. It does not participate in request forwarding. The active connection registry remains in memory. SQLite WAL mode, full synchronous durability, a busy timeout, and a single database writer connection give predictable behavior for the single-node server.
 
 Authentication initially uses operator-issued high-entropy bearer tokens. Only token hashes are persisted. Each person receives a separate token, making domain ownership distinct even though the allowlist is supplied through server configuration.
+
+Forwarding headers from public requests are untrusted by default and are replaced with the direct peer address. Operators may preserve an ingress proxy's forwarding chain only when direct origin access is separately restricted to that proxy.
 
 ## Consequences
 

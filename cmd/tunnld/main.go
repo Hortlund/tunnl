@@ -40,6 +40,8 @@ func run() error {
 	tlsCert := flags.String("tls-cert", os.Getenv("TUNNL_TLS_CERT"), "TLS certificate path")
 	tlsKey := flags.String("tls-key", os.Getenv("TUNNL_TLS_KEY"), "TLS private key path")
 	publicPort := flags.Int("public-port", envInt("TUNNL_PUBLIC_PORT", 8443), "HTTPS port included in generated URLs")
+	trustProxyHeaders := flags.Bool("trust-proxy-headers", envBool("TUNNL_TRUST_PROXY_HEADERS", false), "trust forwarding headers from the ingress proxy")
+	heartbeatTimeout := flags.Duration("heartbeat-timeout", envDuration("TUNNL_HEARTBEAT_TIMEOUT", 40*time.Second), "maximum time between client heartbeats")
 	showVersion := flags.Bool("version", false, "print version information")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		return err
@@ -57,16 +59,18 @@ func run() error {
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	service, err := server.New(server.Config{
-		HTTPAddr:   *httpAddr,
-		HTTPSAddr:  *httpsAddr,
-		QUICAddr:   *quicAddr,
-		BaseDomain: *baseDomain,
-		PublicPort: *publicPort,
-		Database:   *database,
-		AuthTokens: tokens,
-		TLSCert:    *tlsCert,
-		TLSKey:     *tlsKey,
-		Logger:     logger,
+		HTTPAddr:          *httpAddr,
+		HTTPSAddr:         *httpsAddr,
+		QUICAddr:          *quicAddr,
+		BaseDomain:        *baseDomain,
+		PublicPort:        *publicPort,
+		Database:          *database,
+		AuthTokens:        tokens,
+		TrustProxyHeaders: *trustProxyHeaders,
+		HeartbeatTimeout:  *heartbeatTimeout,
+		TLSCert:           *tlsCert,
+		TLSKey:            *tlsKey,
+		Logger:            logger,
 	})
 	if err != nil {
 		return err
@@ -114,6 +118,30 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envBool(key string, fallback bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		return fallback
 	}
