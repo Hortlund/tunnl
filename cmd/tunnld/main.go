@@ -51,6 +51,10 @@ func run() error {
 	authTokens := flags.String("auth-tokens", os.Getenv("TUNNL_AUTH_TOKENS"), "comma-separated client tokens (or TUNNL_AUTH_TOKENS)")
 	tlsCert := flags.String("tls-cert", os.Getenv("TUNNL_TLS_CERT"), "TLS certificate path")
 	tlsKey := flags.String("tls-key", os.Getenv("TUNNL_TLS_KEY"), "TLS private key path")
+	acmeEnabled := flags.Bool("acme", envBool("TUNNL_ACME", false), "automatically manage a Let's Encrypt wildcard certificate with Cloudflare DNS-01")
+	acmeEmail := flags.String("acme-email", os.Getenv("TUNNL_ACME_EMAIL"), "email for the Let's Encrypt ACME account")
+	acmeStorage := flags.String("acme-storage", envOr("TUNNL_ACME_STORAGE", ".data/acme"), "persistent directory for ACME account and certificate state")
+	acmeStaging := flags.Bool("acme-staging", envBool("TUNNL_ACME_STAGING", false), "use the untrusted Let's Encrypt staging environment")
 	adminAddr := flags.String("admin-addr", os.Getenv("TUNNL_ADMIN_ADDR"), "optional admin UI/API listen address")
 	adminToken := flags.String("admin-token", os.Getenv("TUNNL_ADMIN_TOKEN"), "admin UI/API authentication token")
 	adminAllowRemote := flags.Bool("admin-allow-remote", envBool("TUNNL_ADMIN_ALLOW_REMOTE", false), "allow the admin listener to bind beyond loopback")
@@ -86,6 +90,10 @@ func run() error {
 		HeartbeatTimeout:   *heartbeatTimeout,
 		TLSCert:            *tlsCert,
 		TLSKey:             *tlsKey,
+		ACMEEnabled:        *acmeEnabled,
+		ACMEEmail:          *acmeEmail,
+		ACMEStorage:        *acmeStorage,
+		ACMEStaging:        *acmeStaging,
 		AdminAddr:          *adminAddr,
 		AdminToken:         *adminToken,
 		AdminAllowRemote:   *adminAllowRemote,
