@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/caddyserver/certmagic v0.25.3
 	github.com/libdns/cloudflare v0.2.2
-	github.com/quic-go/quic-go v0.61.0
+	github.com/quic-go/quic-go v0.62.0
 	modernc.org/sqlite v1.57.0
 )
 
