@@ -42,6 +42,8 @@ func run() error {
 	hostHeader := flags.String("host-header", "", "Host header sent to the local service")
 	insecure := flags.Bool("insecure", false, "allow an untrusted relay certificate (development only)")
 	responseHeaderTimeout := flags.Duration("response-header-timeout", envDuration("TUNNL_RESPONSE_HEADER_TIMEOUT", 0), "maximum wait for local response headers (0 disables)")
+	logFormat := flags.String("log-format", envOr("TUNNL_LOG_FORMAT", "text"), "client log format: text or json")
+	logLevel := flags.String("log-level", envOr("TUNNL_LOG_LEVEL", "info"), "client log level: debug, info, warn, or error")
 	showVersion := flags.Bool("version", false, "print version information")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -66,7 +68,20 @@ func run() error {
 		return errors.New("--to must be a complete HTTP URL")
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	level, err := parseLogLevel(*logLevel)
+	if err != nil {
+		return err
+	}
+	var handler slog.Handler
+	switch strings.ToLower(*logFormat) {
+	case "", "text":
+		handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+	case "json":
+		handler = slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+	default:
+		return fmt.Errorf("unknown log format %q", *logFormat)
+	}
+	logger := slog.New(handler)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	delay := time.Second

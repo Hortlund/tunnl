@@ -7,7 +7,6 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +20,7 @@ import (
 	quic "github.com/quic-go/quic-go"
 
 	"github.com/Hortlund/tunnl/internal/admin"
+	"github.com/Hortlund/tunnl/internal/limit"
 	"github.com/Hortlund/tunnl/internal/names"
 	"github.com/Hortlund/tunnl/internal/protocol"
 	"github.com/Hortlund/tunnl/internal/store"
@@ -30,26 +30,34 @@ import (
 var errTunnelOffline = errors.New("tunnel is offline")
 
 type Config struct {
-	HTTPAddr           string
-	HTTPSAddr          string
-	QUICAddr           string
-	BaseDomain         string
-	PublicPort         int
-	Database           string
-	AuthTokens         []string
-	TrustProxyHeaders  bool
-	HeartbeatTimeout   time.Duration
-	TLSCert            string
-	TLSKey             string
-	ACMEEnabled        bool
-	ACMEEmail          string
-	ACMEStorage        string
-	ACMEStaging        bool
-	AdminAddr          string
-	AdminToken         string
-	AdminAllowRemote   bool
-	CloudflareAPIToken string
-	Logger             *slog.Logger
+	HTTPAddr              string
+	HTTPSAddr             string
+	QUICAddr              string
+	BaseDomain            string
+	PublicPort            int
+	Database              string
+	AuthTokens            []string
+	TrustProxyHeaders     bool
+	HeartbeatTimeout      time.Duration
+	TLSCert               string
+	TLSKey                string
+	ACMEEnabled           bool
+	ACMEEmail             string
+	ACMEStorage           string
+	ACMEStaging           bool
+	AdminAddr             string
+	AdminToken            string
+	AdminAllowRemote      bool
+	CloudflareAPIToken    string
+	Logger                *slog.Logger
+	MetricsAddr           string
+	MaxRequestBody        int64
+	MaxResponseBody       int64
+	RequestTimeout        time.Duration
+	AcceptLimit           int
+	AcceptWindow          time.Duration
+	HandshakeFailureLimit int
+	HandshakeWindow       time.Duration
 }
 
 type Server struct {
@@ -60,17 +68,61 @@ type Server struct {
 	logger            *slog.Logger
 	admin             http.Handler
 	certificateSource *tlsutil.Source
+	accepts           *limit.Limiter
+	handshakes        *limit.Limiter
+	connsMu           sync.Mutex
+	conns             map[*quic.Conn]struct{}
+	tunnels           sync.WaitGroup
 }
 
 func New(config Config) (*Server, error) {
-	if config.BaseDomain == "" || config.Database == "" {
-		return nil, errors.New("base domain and database are required")
+	config.BaseDomain = strings.ToLower(strings.TrimSpace(config.BaseDomain))
+	if err := validateBaseDomain(config.BaseDomain); err != nil {
+		return nil, err
+	}
+	if config.Database == "" {
+		return nil, errors.New("database is required")
 	}
 	if config.HTTPAddr == "" && config.HTTPSAddr == "" {
 		return nil, errors.New("at least one HTTP listener is required")
 	}
 	if config.QUICAddr == "" {
 		return nil, errors.New("QUIC address is required")
+	}
+	if config.MetricsAddr != "" {
+		if _, _, err := net.SplitHostPort(config.MetricsAddr); err != nil {
+			return nil, errors.New("metrics address must include a host and port")
+		}
+	}
+	if config.MaxRequestBody == 0 {
+		config.MaxRequestBody = 32 << 20
+	}
+	if config.MaxResponseBody == 0 {
+		config.MaxResponseBody = 32 << 20
+	}
+	if config.MaxRequestBody < 0 || config.MaxResponseBody < 0 {
+		return nil, errors.New("request and response body limits must be greater than zero")
+	}
+	if config.RequestTimeout == 0 {
+		config.RequestTimeout = 2 * time.Minute
+	}
+	if config.RequestTimeout < 0 {
+		return nil, errors.New("request timeout must be greater than zero")
+	}
+	if config.AcceptLimit == 0 {
+		config.AcceptLimit = 30
+	}
+	if config.AcceptWindow <= 0 {
+		config.AcceptWindow = time.Minute
+	}
+	if config.HandshakeFailureLimit == 0 {
+		config.HandshakeFailureLimit = 20
+	}
+	if config.HandshakeWindow <= 0 {
+		config.HandshakeWindow = time.Minute
+	}
+	if config.AcceptLimit < -1 || config.HandshakeFailureLimit < -1 {
+		return nil, errors.New("rate limits must be -1 to disable or a positive count")
 	}
 	if config.ACMEEnabled {
 		if config.TLSCert != "" || config.TLSKey != "" {
@@ -114,7 +166,16 @@ func New(config Config) (*Server, error) {
 		database.Close()
 		return nil, errors.New("at least one client token or an enabled admin listener is required")
 	}
-	service := &Server{config: config, store: database, registry: newRegistry(), metrics: newMetrics(), logger: config.Logger}
+	service := &Server{
+		config:     config,
+		store:      database,
+		registry:   newRegistry(),
+		metrics:    newMetrics(),
+		logger:     config.Logger,
+		accepts:    limit.New(config.AcceptLimit, config.AcceptWindow),
+		handshakes: limit.New(config.HandshakeFailureLimit, config.HandshakeWindow),
+		conns:      make(map[*quic.Conn]struct{}),
+	}
 	if config.AdminAddr != "" {
 		handler, err := admin.NewHandler(config.AdminToken, service, config.Logger)
 		if err != nil {
@@ -177,11 +238,21 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.config.AdminAddr != "" {
 		servers = append(servers, &http.Server{Addr: s.config.AdminAddr, Handler: s.admin, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10})
 	}
+	if s.config.MetricsAddr != "" {
+		servers = append(servers, &http.Server{Addr: s.config.MetricsAddr, Handler: s.metricsRoutes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 8 << 10})
+	}
 
 	errorsChannel := make(chan error, len(servers)+1)
-	go func() { errorsChannel <- s.acceptTunnels(ctx, listener) }()
+	acceptDone := make(chan struct{})
+	go func() {
+		err := s.acceptTunnels(ctx, listener)
+		close(acceptDone)
+		select {
+		case errorsChannel <- err:
+		default:
+		}
+	}()
 	for _, httpServer := range servers {
-		httpServer := httpServer
 		go func() {
 			if httpServer.TLSConfig != nil {
 				errorsChannel <- httpServer.ListenAndServeTLS("", "")
@@ -191,17 +262,33 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
-	s.logger.Info("tunnl server started", "http", s.config.HTTPAddr, "https", s.config.HTTPSAddr, "quic", s.config.QUICAddr, "admin", s.config.AdminAddr, "base_domain", s.config.BaseDomain)
+	s.logger.Info("tunnl server started", "http", s.config.HTTPAddr, "https", s.config.HTTPSAddr, "quic", s.config.QUICAddr, "admin", s.config.AdminAddr, "metrics", s.config.MetricsAddr, "base_domain", s.config.BaseDomain)
 	shutdown := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+		_ = listener.Close()
+		select {
+		case <-acceptDone:
+		case <-shutdownCtx.Done():
+		}
+		s.closeTracked()
 		var group sync.WaitGroup
 		for _, httpServer := range servers {
+			httpServer.SetKeepAlivesEnabled(false)
 			group.Add(1)
 			go func(server *http.Server) { defer group.Done(); _ = server.Shutdown(shutdownCtx) }(httpServer)
 		}
-		_ = listener.Close()
 		group.Wait()
+		done := make(chan struct{})
+		go func() {
+			s.tunnels.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-shutdownCtx.Done():
+			s.logger.Warn("timed out waiting for tunnel sessions to finish")
+		}
 	}
 	select {
 	case <-ctx.Done():
@@ -234,42 +321,83 @@ func (s *Server) acceptTunnels(ctx context.Context, listener *quic.Listener) err
 		conn, err := listener.Accept(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil
+				return ctx.Err()
 			}
 			return err
 		}
-		go s.handleTunnel(ctx, conn)
+		ip := remoteIP(conn.RemoteAddr())
+		if !s.accepts.Allow(ip) || !s.handshakes.Permitted(ip) {
+			s.metrics.rejectedAccepts.Add(1)
+			_ = conn.CloseWithError(1, "rate limited")
+			continue
+		}
+		s.tunnels.Add(1)
+		s.track(conn)
+		go func() {
+			defer s.tunnels.Done()
+			defer s.untrack(conn)
+			s.handleTunnel(ctx, conn)
+		}()
 	}
 }
 
+func (s *Server) track(conn *quic.Conn) {
+	s.connsMu.Lock()
+	s.conns[conn] = struct{}{}
+	s.connsMu.Unlock()
+}
+
+func (s *Server) untrack(conn *quic.Conn) {
+	s.connsMu.Lock()
+	delete(s.conns, conn)
+	s.connsMu.Unlock()
+}
+
+func (s *Server) closeTracked() {
+	s.connsMu.Lock()
+	conns := make([]*quic.Conn, 0, len(s.conns))
+	for conn := range s.conns {
+		conns = append(conns, conn)
+	}
+	s.connsMu.Unlock()
+	for _, conn := range conns {
+		_ = conn.CloseWithError(0, "server shutting down")
+	}
+}
+
+func (s *Server) rejectHandshake(conn *quic.Conn, message string) {
+	s.metrics.handshakeFailures.Add(1)
+	s.handshakes.Allow(remoteIP(conn.RemoteAddr()))
+	_ = conn.CloseWithError(1, message)
+}
+
 func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
-	defer conn.CloseWithError(0, "tunnel session ended")
+	defer func() { _ = conn.CloseWithError(0, "tunnel session ended") }()
 	control, err := conn.AcceptStream(ctx)
 	if err != nil {
-		_ = conn.CloseWithError(1, "control stream required")
+		s.rejectHandshake(conn, "control stream required")
 		return
 	}
-	decoder := json.NewDecoder(control)
-	encoder := json.NewEncoder(control)
+	wire := protocol.NewConn(control)
 	_ = control.SetReadDeadline(time.Now().Add(10 * time.Second))
-	var hello protocol.Hello
-	if err := decoder.Decode(&hello); err != nil {
-		_ = conn.CloseWithError(1, "invalid handshake")
+	hello, err := wire.ReadHello()
+	if err != nil {
+		s.rejectHandshake(conn, "invalid handshake")
 		return
 	}
 	if hello.Version != protocol.Version {
-		_ = encoder.Encode(protocol.Welcome{Error: "incompatible protocol version"})
-		_ = conn.CloseWithError(1, "incompatible protocol")
+		_ = wire.WriteWelcome(protocol.Welcome{Error: "incompatible protocol version"})
+		s.rejectHandshake(conn, "incompatible protocol")
 		return
 	}
 	if !s.authenticate(ctx, hello.Token) {
-		_ = encoder.Encode(protocol.Welcome{Error: "authentication failed"})
-		_ = conn.CloseWithError(1, "authentication failed")
+		_ = wire.WriteWelcome(protocol.Welcome{Error: "authentication failed"})
+		s.rejectHandshake(conn, "authentication failed")
 		return
 	}
 	if hello.Mode != "http" {
-		_ = encoder.Encode(protocol.Welcome{Error: "unsupported tunnel mode"})
-		_ = conn.CloseWithError(1, "unsupported mode")
+		_ = wire.WriteWelcome(protocol.Welcome{Error: "unsupported tunnel mode"})
+		s.rejectHandshake(conn, "unsupported mode")
 		return
 	}
 
@@ -284,8 +412,8 @@ func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
 		}
 	}
 	if err != nil {
-		_ = encoder.Encode(protocol.Welcome{Error: err.Error()})
-		_ = conn.CloseWithError(1, "domain unavailable")
+		_ = wire.WriteWelcome(protocol.Welcome{Error: err.Error()})
+		s.rejectHandshake(conn, "domain unavailable")
 		return
 	}
 
@@ -297,16 +425,16 @@ func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
 	if s.config.PublicPort != 0 && s.config.PublicPort != 443 {
 		publicURL += fmt.Sprintf(":%d", s.config.PublicPort)
 	}
-	if err := encoder.Encode(protocol.Welcome{OK: true, Domain: domain, URL: publicURL}); err != nil {
+	if err := wire.WriteWelcome(protocol.Welcome{OK: true, Domain: domain, URL: publicURL}); err != nil {
 		return
 	}
-	s.logger.Info("tunnel connected", "domain", domain, "remote", conn.RemoteAddr())
+	s.logger.Info("tunnel connected", "domain", domain, "remote", conn.RemoteAddr().String())
 	defer s.logger.Info("tunnel disconnected", "domain", domain)
 
 	for {
 		_ = control.SetReadDeadline(time.Now().Add(s.config.HeartbeatTimeout))
-		var message protocol.Control
-		if err := decoder.Decode(&message); err != nil {
+		message, err := wire.ReadControl()
+		if err != nil {
 			return
 		}
 		if message.Type != "ping" {
@@ -337,13 +465,21 @@ func (s *Server) authenticate(ctx context.Context, token string) bool {
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /_tunnl/health", s.health)
+	mux.HandleFunc("GET /_tunnl/ready", s.ready)
 	mux.HandleFunc("/", s.proxy)
 	return mux
 }
 
+func (s *Server) metricsRoutes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /ready", s.ready)
+	mux.HandleFunc("GET /metrics", s.prometheus)
+	return mux
+}
+
 func (s *Server) health(writer http.ResponseWriter, request *http.Request) {
-	host := hostWithoutPort(request.Host)
-	if host != "localhost" && host != "127.0.0.1" && host != "::1" && host != "status."+strings.ToLower(s.config.BaseDomain) {
+	if !s.statusHost(request.Host) && request.URL.Path == "/_tunnl/health" {
 		s.proxy(writer, request)
 		return
 	}
@@ -351,36 +487,89 @@ func (s *Server) health(writer http.ResponseWriter, request *http.Request) {
 	fmt.Fprintf(writer, `{"status":"ok","tunnels":%d}`+"\n", s.registry.count())
 }
 
+func (s *Server) ready(writer http.ResponseWriter, request *http.Request) {
+	if !s.statusHost(request.Host) && request.URL.Path == "/_tunnl/ready" {
+		s.proxy(writer, request)
+		return
+	}
+	if err := s.store.Ping(request.Context()); err != nil {
+		http.Error(writer, "not ready", http.StatusServiceUnavailable)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(writer, "{\"status\":\"ready\",\"tunnels\":%d}\n", s.registry.count())
+}
+
+func (s *Server) statusHost(hostport string) bool {
+	host := hostWithoutPort(hostport)
+	return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "status."+s.config.BaseDomain
+}
+
+func (s *Server) prometheus(writer http.ResponseWriter, _ *http.Request) {
+	writer.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	writePrometheus(writer, s.metrics, s.registry.count())
+}
+
 func (s *Server) proxy(writer http.ResponseWriter, request *http.Request) {
+	started := time.Now()
+	recorder := &statusWriter{ResponseWriter: writer}
 	s.metrics.totalRequests.Add(1)
+	if s.config.RequestTimeout > 0 {
+		ctx, cancel := context.WithTimeout(request.Context(), s.config.RequestTimeout)
+		defer cancel()
+		request = request.WithContext(ctx)
+	}
+	defer func() {
+		status := recorder.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		s.logger.Info("public request",
+			"host", request.Host,
+			"method", request.Method,
+			"path", request.URL.Path,
+			"status", status,
+			"bytes", recorder.bytes,
+			"duration", time.Since(started).String(),
+			"remote", request.RemoteAddr,
+		)
+	}()
 	if request.Header.Get("Upgrade") != "" {
 		s.metrics.failedRequests.Add(1)
-		http.Error(writer, "protocol upgrades are not supported yet", http.StatusNotImplemented)
+		http.Error(recorder, "protocol upgrades are not supported yet", http.StatusNotImplemented)
 		return
 	}
 	host := hostWithoutPort(request.Host)
 	suffix := "." + s.config.BaseDomain
-	if !strings.HasSuffix(strings.ToLower(host), suffix) {
+	if !strings.HasSuffix(host, suffix) {
 		s.metrics.failedRequests.Add(1)
-		http.Error(writer, "unknown tunnl host", http.StatusNotFound)
+		http.Error(recorder, "unknown tunnl host", http.StatusNotFound)
 		return
 	}
-	domain := strings.TrimSuffix(strings.ToLower(host), suffix)
+	domain := strings.TrimSuffix(host, suffix)
 	if strings.Contains(domain, ".") {
 		s.metrics.failedRequests.Add(1)
-		http.Error(writer, "invalid tunnl host", http.StatusNotFound)
+		http.Error(recorder, "invalid tunnl host", http.StatusNotFound)
 		return
+	}
+	if s.config.MaxRequestBody > 0 && request.ContentLength > s.config.MaxRequestBody {
+		s.metrics.failedRequests.Add(1)
+		http.Error(recorder, "request body is too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if s.config.MaxRequestBody > 0 {
+		request.Body = http.MaxBytesReader(nil, request.Body, s.config.MaxRequestBody)
 	}
 	streamCtx, cancel := context.WithTimeout(request.Context(), 15*time.Second)
 	defer cancel()
 	stream, err := s.registry.open(streamCtx, domain)
 	if err != nil {
 		s.metrics.failedRequests.Add(1)
-		http.Error(writer, "tunnel is offline", http.StatusBadGateway)
+		http.Error(recorder, "tunnel is offline", http.StatusBadGateway)
 		return
 	}
 	defer stream.Close()
-	_ = http.NewResponseController(writer).EnableFullDuplex()
+	_ = http.NewResponseController(recorder).EnableFullDuplex()
 	requestFinished := make(chan struct{})
 	defer close(requestFinished)
 	go func() {
@@ -403,20 +592,91 @@ func (s *Server) proxy(writer http.ResponseWriter, request *http.Request) {
 	if err != nil {
 		s.metrics.failedRequests.Add(1)
 		finishRequestWrite(request, stream, requestWrite)
-		http.Error(writer, "tunnel response failed", http.StatusBadGateway)
+		http.Error(recorder, "tunnel response failed", http.StatusBadGateway)
 		return
 	}
 	defer finishRequestWrite(request, stream, requestWrite)
 	defer response.Body.Close()
-	copyHeaders(writer.Header(), response.Header)
-	writer.Header().Set("Via", "tunnl")
-	writer.WriteHeader(response.StatusCode)
-	written, err := io.Copy(writer, response.Body)
+	if s.config.MaxResponseBody > 0 && response.ContentLength > s.config.MaxResponseBody {
+		s.metrics.failedRequests.Add(1)
+		http.Error(recorder, "tunnel response too large", http.StatusBadGateway)
+		return
+	}
+	copyHeaders(recorder.Header(), response.Header)
+	recorder.Header().Set("Via", "tunnl")
+	recorder.WriteHeader(response.StatusCode)
+	body := io.Reader(response.Body)
+	if s.config.MaxResponseBody > 0 {
+		body = io.LimitReader(response.Body, s.config.MaxResponseBody+1)
+	}
+	written, err := io.Copy(recorder, body)
 	s.metrics.responseBytes.Add(uint64(written))
+	if s.config.MaxResponseBody > 0 && written > s.config.MaxResponseBody {
+		s.metrics.failedRequests.Add(1)
+		stream.CancelRead(3)
+		s.logger.Warn("tunnel response exceeded the body limit", "domain", domain, "limit", s.config.MaxResponseBody)
+		return
+	}
 	if err != nil {
 		s.metrics.failedRequests.Add(1)
 		s.logger.Debug("public response ended", "domain", domain, "error", err)
 	}
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(data)
+	w.bytes += int64(n)
+	return n, err
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func remoteIP(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return host
+}
+
+func validateBaseDomain(domain string) error {
+	if domain == "" || len(domain) > 253 || strings.ContainsAny(domain, "/:\\*? \t") {
+		return errors.New("base domain must be a bare hostname")
+	}
+	labels := strings.Split(domain, ".")
+	if len(labels) < 2 {
+		return errors.New("base domain must contain at least two labels")
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return errors.New("base domain must be a bare hostname")
+		}
+		for _, char := range label {
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+				return errors.New("base domain must be a bare hostname")
+			}
+		}
+	}
+	return nil
 }
 
 func finishRequestWrite(request *http.Request, stream *quic.Stream, writeDone <-chan error) {

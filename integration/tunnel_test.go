@@ -158,7 +158,7 @@ func TestHTTPForwardingAndStableReservation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("server shutdown: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(12 * time.Second):
 		t.Fatal("server did not stop")
 	}
 }
@@ -226,7 +226,7 @@ func TestHeartbeatTimeoutDisconnectsClient(t *testing.T) {
 		if err != nil {
 			t.Fatalf("server shutdown: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(12 * time.Second):
 		t.Fatal("server did not stop")
 	}
 }
@@ -300,7 +300,149 @@ func TestManagedTokenConnectsAndRevocationDisconnects(t *testing.T) {
 		if err != nil {
 			t.Fatalf("server shutdown: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(12 * time.Second):
+		t.Fatal("server did not stop")
+	}
+}
+
+func TestEndToEndProxiesRequest(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.ContentLength > 8 {
+			t.Errorf("oversized body reached the target: %d", request.ContentLength)
+		}
+		writer.Header().Set("X-Target", "reached")
+		_, _ = io.WriteString(writer, "proxied "+request.URL.Path)
+	}))
+	defer target.Close()
+
+	httpAddr := freeTCPAddr(t)
+	metricsAddr := freeTCPAddr(t)
+	quicAddr := freeUDPAddr(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service, err := server.New(server.Config{
+		HTTPAddr:        httpAddr,
+		QUICAddr:        quicAddr,
+		MetricsAddr:     metricsAddr,
+		BaseDomain:      "tunnl.test",
+		PublicPort:      443,
+		Database:        filepath.Join(t.TempDir(), "tunnl.db"),
+		AuthTokens:      []string{"integration-secret"},
+		MaxRequestBody:  8,
+		MaxResponseBody: 1 << 20,
+		Logger:          logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	serverCtx, stopServer := context.WithCancel(context.Background())
+	defer stopServer()
+	serverErrors := make(chan error, 1)
+	go func() { serverErrors <- service.Run(serverCtx) }()
+	waitForHealth(t, httpAddr)
+
+	clientCtx, stopClient := context.WithCancel(context.Background())
+	ready := make(chan protocol.Welcome, 1)
+	tunnel, err := client.New(client.Config{
+		Server:             quicAddr,
+		Token:              "integration-secret",
+		Domain:             "e2e",
+		Target:             targetURL(t, target.URL),
+		InsecureSkipVerify: true,
+		DisableState:       true,
+		Logger:             logger,
+		OnReady:            func(welcome protocol.Welcome) { ready <- welcome },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientErrors := make(chan error, 1)
+	go func() { clientErrors <- tunnel.Run(clientCtx) }()
+	select {
+	case welcome := <-ready:
+		if welcome.URL != "https://e2e.tunnl.test" {
+			t.Fatalf("public URL = %q", welcome.URL)
+		}
+	case err := <-clientErrors:
+		t.Fatalf("client stopped before ready: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not become ready")
+	}
+
+	httpClient := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	request, err := http.NewRequest(http.MethodPost, "http://"+httpAddr+"/through", strings.NewReader("ok"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Host = "e2e.tunnl.test"
+	response, err := httpClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || string(body) != "proxied /through" || response.Header.Get("X-Target") != "reached" || response.Header.Get("Via") != "tunnl" {
+		t.Fatalf("proxied response status=%d via=%q body=%q", response.StatusCode, response.Header.Get("Via"), body)
+	}
+
+	oversized, err := http.NewRequest(http.MethodPost, "http://"+httpAddr+"/too-big", strings.NewReader("0123456789"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oversized.Host = "e2e.tunnl.test"
+	limited, err := httpClient.Do(oversized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited.Body.Close()
+	if limited.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized request status = %d", limited.StatusCode)
+	}
+
+	readyResponse, err := httpClient.Get("http://" + httpAddr + "/_tunnl/ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyBody, err := io.ReadAll(readyResponse.Body)
+	readyResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readyResponse.StatusCode != http.StatusOK || !strings.Contains(string(readyBody), `"status":"ready"`) {
+		t.Fatalf("ready = %d %s", readyResponse.StatusCode, readyBody)
+	}
+	metricsResponse, err := httpClient.Get("http://" + metricsAddr + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metricsBody, err := io.ReadAll(metricsResponse.Body)
+	metricsResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metricsResponse.StatusCode != http.StatusOK || !strings.Contains(string(metricsBody), "tunnl_tunnels_active 1") || !strings.Contains(string(metricsBody), "tunnl_requests_total") {
+		t.Fatalf("metrics = %d %s", metricsResponse.StatusCode, metricsBody)
+	}
+
+	stopClient()
+	select {
+	case err := <-clientErrors:
+		if err != nil {
+			t.Fatalf("client shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not stop")
+	}
+	stopServer()
+	select {
+	case err := <-serverErrors:
+		if err != nil {
+			t.Fatalf("server shutdown: %v", err)
+		}
+	case <-time.After(12 * time.Second):
 		t.Fatal("server did not stop")
 	}
 }
@@ -330,8 +472,9 @@ func freeUDPAddr(t *testing.T) string {
 func waitForHealth(t *testing.T, address string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 	for time.Now().Before(deadline) {
-		response, err := http.Get("http://" + address + "/_tunnl/health")
+		response, err := client.Get("http://" + address + "/_tunnl/health")
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {

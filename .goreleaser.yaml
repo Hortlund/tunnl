@@ -14,10 +14,31 @@ builds:
         -X github.com/Hortlund/tunnl/internal/version.Version={{.Version}}
         -X github.com/Hortlund/tunnl/internal/version.Commit={{.Commit}}
         -X github.com/Hortlund/tunnl/internal/version.Date={{.Date}}
+  - id: tunnl-server
+    main: ./cmd/tunnld
+    binary: tunnld
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/Hortlund/tunnl/internal/version.Version={{.Version}}
+        -X github.com/Hortlund/tunnl/internal/version.Commit={{.Commit}}
+        -X github.com/Hortlund/tunnl/internal/version.Date={{.Date}}
 
 archives:
   - id: tunnl-client
     ids: [tunnl-client]
+    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+  - id: tunnl-server
+    ids: [tunnl-server]
+    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats: [tar.gz]
     format_overrides:
       - goos: windows

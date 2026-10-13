@@ -8,6 +8,9 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Hortlund/tunnl/internal/limit"
 )
 
 const testAdminToken = "this-is-a-long-test-admin-token-1234567890"
@@ -33,6 +36,34 @@ func TestHandlerRequiresStrongAdminToken(t *testing.T) {
 	t.Parallel()
 	if _, err := NewHandler("short", fakeBackend{}, nil); err == nil {
 		t.Fatal("short admin token was accepted")
+	}
+}
+
+func TestLoginRateLimit(t *testing.T) {
+	t.Parallel()
+	handler, err := NewHandler(testAdminToken, fakeBackend{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.loginLimiter = limit.New(2, time.Minute)
+	handler.failureDelay = 0
+	for attempt := 1; attempt <= 2; attempt++ {
+		request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token=wrong"))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.RemoteAddr = "203.0.113.8:1234"
+		response := httptest.NewRecorder()
+		handler.Routes().ServeHTTP(response, request)
+		if response.Code != http.StatusSeeOther {
+			t.Fatalf("attempt %d = %d, want redirect", attempt, response.Code)
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("token="+testAdminToken))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.RemoteAddr = "203.0.113.8:1234"
+	response := httptest.NewRecorder()
+	handler.Routes().ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("limited login = %d, want 429", response.Code)
 	}
 }
 

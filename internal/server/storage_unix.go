@@ -12,5 +12,5 @@ func diskSpace(path string) (total, free uint64) {
 	if err := syscall.Statfs(filepath.Dir(path), &value); err != nil {
 		return 0, 0
 	}
-	return uint64(value.Blocks) * uint64(value.Bsize), uint64(value.Bavail) * uint64(value.Bsize)
+	return value.Blocks * uint64(value.Bsize), value.Bavail * uint64(value.Bsize)
 }

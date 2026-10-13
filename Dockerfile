@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.27-alpine AS build
+FROM golang:1.27.2-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -17,7 +17,7 @@ COPY --from=build /out/tunnld /usr/local/bin/tunnld
 COPY --from=build --chown=65532:65532 /out/data /data
 USER 65532:65532
 VOLUME ["/data"]
-EXPOSE 8080/tcp 8443/tcp 8443/udp 9090/tcp
+EXPOSE 8080/tcp 8443/tcp 8443/udp 9090/tcp 9091/tcp
 ENV TUNNL_DATABASE=/data/tunnl.db
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/usr/local/bin/tunnld", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/tunnld"]

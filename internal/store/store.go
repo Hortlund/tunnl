@@ -87,13 +87,15 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
 func (s *Store) Reserve(ctx context.Context, domain, tokenHash string) error {
 	now := time.Now().Unix()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var owner string
 	err = tx.QueryRowContext(ctx, "SELECT token_hash FROM domain_reservations WHERE domain = ?", domain).Scan(&owner)
 	switch {

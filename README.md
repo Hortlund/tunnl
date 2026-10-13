@@ -5,7 +5,7 @@ Fast, reliable, self-hosted tunnels for exposing local HTTP services to the inte
 `tunnl` is the client your users install. `tunnld` is the server daemon you host. They are separate binaries built from one Go codebase and communicate over encrypted, multiplexed QUIC streams.
 
 > [!IMPORTANT]
-> This repository is an early working foundation. HTTP forwarding is implemented. Raw TCP forwarding and a WebSocket fallback transport are on the roadmap and are not yet available.
+> HTTP forwarding is ready to deploy on a single VPS. See [DEPLOY.md](DEPLOY.md) for DNS, firewall, Let's Encrypt, tokens, upgrades, and backups. Raw TCP forwarding and a WebSocket fallback transport remain on the roadmap.
 
 ## Why tunnl
 
@@ -209,6 +209,15 @@ Reconciliation creates or updates `*.tunnl.at` as a proxied record and `relay.tu
 | `TUNNL_ADMIN_ALLOW_REMOTE` | `false` | Permit an explicitly protected non-loopback admin bind |
 | `TUNNL_ADMIN_URL` | `http://127.0.0.1:9090` | Admin API URL used by `tunnld admin` commands |
 | `TUNNL_CLOUDFLARE_API_TOKEN` | empty | Scoped credential used for automatic ACME and optional DNS reconciliation |
+| `TUNNL_CONFIG` | empty | JSON config file. Flags override environment variables, which override the file |
+| `TUNNL_METRICS_ADDR` | `127.0.0.1:9091` | Prometheus, `/health`, and `/ready`. An empty value disables the listener |
+| `TUNNL_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error`. Server logs are JSON on stdout |
+| `TUNNL_MAX_REQUEST_BODY` | `33554432` | Maximum proxied request body in bytes |
+| `TUNNL_MAX_RESPONSE_BODY` | `33554432` | Maximum proxied response body in bytes |
+| `TUNNL_REQUEST_TIMEOUT` | `2m` | Maximum duration of one proxied request |
+| `TUNNL_ACCEPT_LIMIT` | `30` | QUIC accepts per remote IP per minute. `-1` disables the limiter |
+| `TUNNL_HANDSHAKE_FAILURE_LIMIT` | `20` | Failed handshakes per remote IP per minute. `-1` disables the limiter |
+| `TUNNL_LOG_FORMAT` | `text` | Client log format, `text` or `json` |
 
 Generate separate high-entropy tokens for each person. A domain reservation belongs to the SHA-256 hash of the token that created it, so another client token cannot claim it.
 
@@ -221,7 +230,7 @@ Leave `TUNNL_TRUST_PROXY_HEADERS` disabled unless direct access to the origin is
 - A reconnect with the same token atomically replaces an older connection.
 - Reservations survive disconnects and process restarts.
 - The proxy does not buffer whole request or response bodies.
-- Shutdown drains HTTP listeners before the server exits.
+- Shutdown closes active QUIC sessions, drains HTTP listeners, and waits up to 15 seconds.
 - Release builds embed protocol and application versions.
 
 ## Roadmap
@@ -229,7 +238,7 @@ Leave `TUNNL_TRUST_PROXY_HEADERS` disabled unless direct access to the origin is
 1. WebSocket-over-TLS fallback for networks that block UDP.
 2. Raw TCP forwarding using allocated public ports.
 3. WebSocket upgrade tunneling and expanded HTTP integration tests.
-4. Rate limiting, Prometheus export, and abuse controls.
+4. Per-user quotas and abuse response beyond the connection, handshake, and admin login rate limits.
 5. User-owned custom domains and automated validation.
 6. PostgreSQL and multi-node routing if horizontal scaling becomes necessary.
 
@@ -243,7 +252,7 @@ make test-race
 make lint
 ```
 
-Releases are published from GitHub's **Releases** page using a `v`-prefixed semantic version tag such as `v0.1.0`. Publishing the release triggers GoReleaser to attach cross-platform client binaries and publishes the multi-architecture server image as `ghcr.io/hortlund/tunnl-server:0.1.0`. The `v` prefix is reserved for the Git tag, so both `tunnl --version` and `tunnld --version` report `0.1.0`; stable releases also update the `latest` image tag.
+Pushing a `v`-prefixed semantic version tag such as `v0.1.0` runs the release workflow. GoReleaser publishes the GitHub Release with cross-platform `tunnl` and `tunnld` archives, and the workflow pushes the multi-architecture server image as `ghcr.io/<owner>/tunnl-server:0.1.0`. The `v` prefix is reserved for the Git tag, so both `tunnl --version` and `tunnld --version` report `0.1.0`. Tags without a prerelease suffix also update the `latest` image tag. Deployment steps are in [DEPLOY.md](DEPLOY.md).
 
 ## License
 
