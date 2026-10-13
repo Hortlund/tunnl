@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -82,7 +81,7 @@ func (c *Client) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("connect to relay: %w", err)
 	}
-	defer conn.CloseWithError(0, "client stopped")
+	defer func() { _ = conn.CloseWithError(0, "client stopped") }()
 
 	control, err := conn.OpenStreamSync(ctx)
 	if err != nil {
@@ -93,7 +92,8 @@ func (c *Client) Run(ctx context.Context) error {
 	if domain == "" && !c.config.DisableState {
 		domain = loadDomain(stateKey)
 	}
-	if err := json.NewEncoder(control).Encode(protocol.Hello{
+	wire := protocol.NewConn(control)
+	if err := wire.WriteHello(protocol.Hello{
 		Version: protocol.Version,
 		Token:   c.config.Token,
 		Domain:  domain,
@@ -101,8 +101,8 @@ func (c *Client) Run(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("send handshake: %w", err)
 	}
-	var welcome protocol.Welcome
-	if err := json.NewDecoder(control).Decode(&welcome); err != nil {
+	welcome, err := wire.ReadWelcome()
+	if err != nil {
 		return fmt.Errorf("read handshake: %w", err)
 	}
 	if !welcome.OK {
@@ -118,7 +118,7 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 
 	heartbeatDone := make(chan error, 1)
-	go func() { heartbeatDone <- c.heartbeat(ctx, control) }()
+	go func() { heartbeatDone <- c.heartbeat(ctx, wire) }()
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
@@ -138,16 +138,15 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
-func (c *Client) heartbeat(ctx context.Context, control *quic.Stream) error {
+func (c *Client) heartbeat(ctx context.Context, wire *protocol.Conn) error {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
-	encoder := json.NewEncoder(control)
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := encoder.Encode(protocol.Control{Type: "ping"}); err != nil {
+			if err := wire.WriteControl(protocol.Control{Type: "ping"}); err != nil {
 				return fmt.Errorf("send heartbeat: %w", err)
 			}
 		}

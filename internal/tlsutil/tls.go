@@ -211,9 +211,10 @@ func (s *Source) onEvent(_ context.Context, event string, data map[string]any) e
 	s.mu.Lock()
 	s.lastEvent = event
 	s.lastEventAt = time.Now().UTC()
-	if event == "cert_failed" {
+	switch event {
+	case "cert_failed":
 		s.lastError = fmt.Sprint(data["error"])
-	} else if event == "cert_obtained" || event == "cached_managed_cert" {
+	case "cert_obtained", "cached_managed_cert":
 		s.lastError = ""
 	}
 	s.mu.Unlock()

@@ -93,7 +93,7 @@ func (s *Store) Reserve(ctx context.Context, domain, tokenHash string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var owner string
 	err = tx.QueryRowContext(ctx, "SELECT token_hash FROM domain_reservations WHERE domain = ?", domain).Scan(&owner)
 	switch {

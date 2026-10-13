@@ -17,7 +17,6 @@ func TestNormalize(t *testing.T) {
 		{input: "ab", valid: false},
 	}
 	for _, test := range tests {
-		test := test
 		t.Run(test.input, func(t *testing.T) {
 			t.Parallel()
 			got, err := Normalize(test.input)

@@ -198,7 +198,9 @@ func (h *Handler) asset(name, contentType string) http.HandlerFunc {
 			return
 		}
 		writer.Header().Set("Content-Type", contentType)
-		writer.Write(data)
+		if _, err := writer.Write(data); err != nil {
+			h.logger.Debug("write admin asset", "name", name, "error", err)
+		}
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -181,7 +180,6 @@ func (s *Server) Run(ctx context.Context) error {
 	errorsChannel := make(chan error, len(servers)+1)
 	go func() { errorsChannel <- s.acceptTunnels(ctx, listener) }()
 	for _, httpServer := range servers {
-		httpServer := httpServer
 		go func() {
 			if httpServer.TLSConfig != nil {
 				errorsChannel <- httpServer.ListenAndServeTLS("", "")
@@ -234,7 +232,7 @@ func (s *Server) acceptTunnels(ctx context.Context, listener *quic.Listener) err
 		conn, err := listener.Accept(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil
+				return ctx.Err()
 			}
 			return err
 		}
@@ -243,32 +241,31 @@ func (s *Server) acceptTunnels(ctx context.Context, listener *quic.Listener) err
 }
 
 func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
-	defer conn.CloseWithError(0, "tunnel session ended")
+	defer func() { _ = conn.CloseWithError(0, "tunnel session ended") }()
 	control, err := conn.AcceptStream(ctx)
 	if err != nil {
 		_ = conn.CloseWithError(1, "control stream required")
 		return
 	}
-	decoder := json.NewDecoder(control)
-	encoder := json.NewEncoder(control)
+	wire := protocol.NewConn(control)
 	_ = control.SetReadDeadline(time.Now().Add(10 * time.Second))
-	var hello protocol.Hello
-	if err := decoder.Decode(&hello); err != nil {
+	hello, err := wire.ReadHello()
+	if err != nil {
 		_ = conn.CloseWithError(1, "invalid handshake")
 		return
 	}
 	if hello.Version != protocol.Version {
-		_ = encoder.Encode(protocol.Welcome{Error: "incompatible protocol version"})
+		_ = wire.WriteWelcome(protocol.Welcome{Error: "incompatible protocol version"})
 		_ = conn.CloseWithError(1, "incompatible protocol")
 		return
 	}
 	if !s.authenticate(ctx, hello.Token) {
-		_ = encoder.Encode(protocol.Welcome{Error: "authentication failed"})
+		_ = wire.WriteWelcome(protocol.Welcome{Error: "authentication failed"})
 		_ = conn.CloseWithError(1, "authentication failed")
 		return
 	}
 	if hello.Mode != "http" {
-		_ = encoder.Encode(protocol.Welcome{Error: "unsupported tunnel mode"})
+		_ = wire.WriteWelcome(protocol.Welcome{Error: "unsupported tunnel mode"})
 		_ = conn.CloseWithError(1, "unsupported mode")
 		return
 	}
@@ -284,7 +281,7 @@ func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
 		}
 	}
 	if err != nil {
-		_ = encoder.Encode(protocol.Welcome{Error: err.Error()})
+		_ = wire.WriteWelcome(protocol.Welcome{Error: err.Error()})
 		_ = conn.CloseWithError(1, "domain unavailable")
 		return
 	}
@@ -297,7 +294,7 @@ func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
 	if s.config.PublicPort != 0 && s.config.PublicPort != 443 {
 		publicURL += fmt.Sprintf(":%d", s.config.PublicPort)
 	}
-	if err := encoder.Encode(protocol.Welcome{OK: true, Domain: domain, URL: publicURL}); err != nil {
+	if err := wire.WriteWelcome(protocol.Welcome{OK: true, Domain: domain, URL: publicURL}); err != nil {
 		return
 	}
 	s.logger.Info("tunnel connected", "domain", domain, "remote", conn.RemoteAddr())
@@ -305,8 +302,8 @@ func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
 
 	for {
 		_ = control.SetReadDeadline(time.Now().Add(s.config.HeartbeatTimeout))
-		var message protocol.Control
-		if err := decoder.Decode(&message); err != nil {
+		message, err := wire.ReadControl()
+		if err != nil {
 			return
 		}
 		if message.Type != "ping" {
