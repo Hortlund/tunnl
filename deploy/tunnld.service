@@ -1,0 +1,24 @@
+[Unit]
+Description=tunnl server
+Documentation=https://github.com/Hortlund/tunnl/blob/main/DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tunnl
+Group=tunnl
+EnvironmentFile=-/etc/tunnl/tunnld.env
+ExecStart=/usr/local/bin/tunnld
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tunnl
+StateDirectory=tunnl
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

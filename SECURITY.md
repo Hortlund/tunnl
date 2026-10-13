@@ -20,4 +20,4 @@ Please report vulnerabilities privately through GitHub's security advisory inter
 - Back up the SQLite database and its associated WAL state using a SQLite-aware snapshot procedure.
 - Apply request limits and upstream abuse protection before operating a public anonymous service.
 
-Bootstrap and admin-managed client tokens are appropriate for a small trusted deployment. A public multi-tenant deployment still needs user-facing account management, rate limiting, quotas, persistent audit tooling, and abuse response controls before accepting untrusted users.
+Bootstrap and admin-managed client tokens are appropriate for a small trusted deployment. The server rate-limits QUIC accepts, failed handshakes, and admin login attempts, and it caps proxied body size. A public multi-tenant deployment still needs user-facing account management, per-user quotas, persistent audit tooling, and abuse response controls before accepting untrusted users.

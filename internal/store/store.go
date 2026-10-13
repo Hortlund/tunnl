@@ -87,6 +87,8 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
 func (s *Store) Reserve(ctx context.Context, domain, tokenHash string) error {
 	now := time.Now().Unix()
 	tx, err := s.db.BeginTx(ctx, nil)

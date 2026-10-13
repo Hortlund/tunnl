@@ -71,6 +71,42 @@ func TestForwardingHeadersFromTrustedProxy(t *testing.T) {
 	}
 }
 
+func TestRejectsInvalidBaseDomain(t *testing.T) {
+	t.Parallel()
+	for _, domain := range []string{"", "localhost", "https://tunnl.test", "*.tunnl.test", "tunnl.test/path"} {
+		_, err := New(Config{
+			HTTPAddr:   "127.0.0.1:0",
+			QUICAddr:   "127.0.0.1:0",
+			BaseDomain: domain,
+			Database:   filepath.Join(t.TempDir(), "tunnl.db"),
+			AuthTokens: []string{"token"},
+		})
+		if err == nil {
+			t.Fatalf("base domain %q was accepted", domain)
+		}
+	}
+}
+
+func TestPrometheusExposition(t *testing.T) {
+	t.Parallel()
+	collected := newMetrics()
+	collected.totalRequests.Add(4)
+	collected.handshakeFailures.Add(2)
+	var body strings.Builder
+	writePrometheus(&body, collected, 3)
+	text := body.String()
+	for _, line := range []string{
+		"tunnl_tunnels_active 3",
+		"tunnl_requests_total 4",
+		"tunnl_handshake_failures_total 2",
+		`tunnl_build_info{version="dev",commit="none"} 1`,
+	} {
+		if !strings.Contains(text, line) {
+			t.Fatalf("metrics missing %q:\n%s", line, text)
+		}
+	}
+}
+
 func TestAdminListenerDefaultsToLoopback(t *testing.T) {
 	t.Parallel()
 	_, err := New(Config{

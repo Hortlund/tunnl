@@ -12,10 +12,13 @@ import (
 	"html/template"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Hortlund/tunnl/internal/limit"
 )
 
 //go:embed web/*
@@ -38,13 +41,15 @@ type session struct {
 }
 
 type Handler struct {
-	adminToken string
-	backend    Backend
-	logger     *slog.Logger
-	index      *template.Template
-	login      *template.Template
-	mu         sync.Mutex
-	sessions   map[string]session
+	adminToken   string
+	backend      Backend
+	logger       *slog.Logger
+	index        *template.Template
+	login        *template.Template
+	mu           sync.Mutex
+	sessions     map[string]session
+	loginLimiter *limit.Limiter
+	failureDelay time.Duration
 }
 
 func NewHandler(adminToken string, backend Backend, logger *slog.Logger) (*Handler, error) {
@@ -65,7 +70,16 @@ func NewHandler(adminToken string, backend Backend, logger *slog.Logger) (*Handl
 	if err != nil {
 		return nil, err
 	}
-	return &Handler{adminToken: adminToken, backend: backend, logger: logger, index: index, login: login, sessions: make(map[string]session)}, nil
+	return &Handler{
+		adminToken:   adminToken,
+		backend:      backend,
+		logger:       logger,
+		index:        index,
+		login:        login,
+		sessions:     make(map[string]session),
+		loginLimiter: limit.New(10, time.Minute),
+		failureDelay: 250 * time.Millisecond,
+	}, nil
 }
 
 func (h *Handler) Routes() http.Handler {
@@ -148,9 +162,15 @@ func (h *Handler) loginPage(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (h *Handler) loginSubmit(writer http.ResponseWriter, request *http.Request) {
+	if !h.loginLimiter.Allow(clientIP(request)) {
+		http.Error(writer, "too many login attempts", http.StatusTooManyRequests)
+		return
+	}
 	request.Body = http.MaxBytesReader(writer, request.Body, 8<<10)
 	if err := request.ParseForm(); err != nil || !constantTimeEqual(request.FormValue("token"), h.adminToken) {
-		time.Sleep(250 * time.Millisecond)
+		if h.failureDelay > 0 {
+			time.Sleep(h.failureDelay)
+		}
 		http.Redirect(writer, request, "/login?error=1", http.StatusSeeOther)
 		return
 	}
@@ -170,6 +190,14 @@ func (h *Handler) loginSubmit(writer http.ResponseWriter, request *http.Request)
 	secureCookie := request.TLS != nil || strings.EqualFold(request.Header.Get("X-Forwarded-Proto"), "https")
 	http.SetCookie(writer, &http.Cookie{Name: "tunnl_admin_session", Value: id, Path: "/", HttpOnly: true, Secure: secureCookie, SameSite: http.SameSiteStrictMode, MaxAge: 12 * 60 * 60})
 	http.Redirect(writer, request, "/", http.StatusSeeOther)
+}
+
+func clientIP(request *http.Request) string {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err != nil {
+		return request.RemoteAddr
+	}
+	return host
 }
 
 func (h *Handler) logout(writer http.ResponseWriter, request *http.Request) {

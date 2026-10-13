@@ -16,14 +16,16 @@ const (
 )
 
 type metrics struct {
-	startedAt        time.Time
-	totalConnections atomic.Uint64
-	totalRequests    atomic.Uint64
-	failedRequests   atomic.Uint64
-	responseBytes    atomic.Uint64
-	mu               sync.RWMutex
-	history          []admin.MetricSample
-	previous         metricCounters
+	startedAt         time.Time
+	totalConnections  atomic.Uint64
+	totalRequests     atomic.Uint64
+	failedRequests    atomic.Uint64
+	responseBytes     atomic.Uint64
+	handshakeFailures atomic.Uint64
+	rejectedAccepts   atomic.Uint64
+	mu                sync.RWMutex
+	history           []admin.MetricSample
+	previous          metricCounters
 }
 
 type metricCounters struct {
