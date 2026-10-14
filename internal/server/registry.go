@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	quic "github.com/quic-go/quic-go"
+	"github.com/Hortlund/tunnl/internal/link"
 )
 
 type session struct {
@@ -14,7 +14,7 @@ type session struct {
 	tokenHash   string
 	remote      string
 	connectedAt time.Time
-	conn        *quic.Conn
+	conn        link.Conn
 }
 
 type sessionInfo struct {
@@ -50,7 +50,7 @@ func (r *registry) unregister(value *session) {
 	r.mu.Unlock()
 }
 
-func (r *registry) open(ctx context.Context, domain string) (*quic.Stream, error) {
+func (r *registry) open(ctx context.Context, domain string) (link.Stream, error) {
 	r.mu.RLock()
 	value := r.sessions[domain]
 	r.mu.RUnlock()

@@ -78,6 +78,13 @@ func Open(path string) (*Store, error) {
 			target TEXT NOT NULL,
 			updated_at INTEGER NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS tcp_ports (
+			port INTEGER PRIMARY KEY,
+			token_hash TEXT NOT NULL,
+			label TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			UNIQUE(token_hash, label)
+		);
 	`); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate sqlite: %w", err)
@@ -217,6 +224,79 @@ func (s *Store) DNSConfig(ctx context.Context) (DNSConfig, error) {
 	}
 	config.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 	return config, nil
+}
+
+func (s *Store) LookupTCP(ctx context.Context, tokenHash, label string) (int, bool, error) {
+	var port int
+	err := s.db.QueryRowContext(ctx, "SELECT port FROM tcp_ports WHERE token_hash = ? AND label = ?", tokenHash, label).Scan(&port)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return port, true, nil
+}
+
+func (s *Store) TCPPorts(ctx context.Context) (map[int]string, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT port, token_hash FROM tcp_ports")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ports := make(map[int]string)
+	for rows.Next() {
+		var port int
+		var tokenHash string
+		if err := rows.Scan(&port, &tokenHash); err != nil {
+			return nil, err
+		}
+		ports[port] = tokenHash
+	}
+	return ports, rows.Err()
+}
+
+func (s *Store) CountTCP(ctx context.Context, tokenHash string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM tcp_ports WHERE token_hash = ?", tokenHash).Scan(&count)
+	return count, err
+}
+
+func (s *Store) SaveTCP(ctx context.Context, port int, tokenHash, label string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM tcp_ports WHERE token_hash = ? AND label = ? AND port <> ?", tokenHash, label, port); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO tcp_ports(port, token_hash, label, created_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(port) DO UPDATE SET token_hash = excluded.token_hash, label = excluded.label
+		WHERE tcp_ports.token_hash = excluded.token_hash
+	`, port, tokenHash, label, time.Now().Unix()); err != nil {
+		return err
+	}
+	var owner string
+	if err := tx.QueryRowContext(ctx, "SELECT token_hash FROM tcp_ports WHERE port = ?", port).Scan(&owner); err != nil {
+		return err
+	}
+	if owner != tokenHash {
+		return errors.New("tcp port is reserved")
+	}
+	return tx.Commit()
+}
+
+func (s *Store) DeleteTCPPort(ctx context.Context, port int) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM tcp_ports WHERE port = ?", port)
+	return err
+}
+
+func (s *Store) DeleteTCPByToken(ctx context.Context, tokenHash string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM tcp_ports WHERE token_hash = ?", tokenHash)
+	return err
 }
 
 func (s *Store) SetDNSConfig(ctx context.Context, config DNSConfig) error {

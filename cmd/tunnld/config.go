@@ -30,6 +30,9 @@ const (
 	defaultLogLevel         = "info"
 	defaultHeartbeatTimeout = 40 * time.Second
 	defaultRequestTimeout   = 2 * time.Minute
+	defaultMaxTCPPerToken   = 4
+	defaultMaxTCPConns      = 64
+	defaultTCPAcceptLimit   = 60
 )
 
 type fileConfig struct {
@@ -60,6 +63,14 @@ type fileConfig struct {
 	AcceptLimit           *int    `json:"accept_limit"`
 	HandshakeFailureLimit *int    `json:"handshake_failure_limit"`
 	LogLevel              *string `json:"log_level"`
+	DisableWebSocket      *bool   `json:"disable_websocket"`
+	TCPBind               *string `json:"tcp_bind"`
+	TCPPortMin            *int    `json:"tcp_port_min"`
+	TCPPortMax            *int    `json:"tcp_port_max"`
+	TCPPublicHost         *string `json:"tcp_public_host"`
+	MaxTCPPerToken        *int    `json:"max_tcp_per_token"`
+	MaxTCPConnections     *int    `json:"max_tcp_connections"`
+	TCPAcceptLimit        *int    `json:"tcp_accept_limit"`
 }
 
 func loadServerConfig(args []string, output io.Writer) (server.Config, *slog.Logger, bool, error) {
@@ -93,6 +104,14 @@ func loadServerConfig(args []string, output io.Writer) (server.Config, *slog.Log
 	flags.Int("accept-limit", 0, "QUIC accepts allowed per remote IP per minute; -1 disables")
 	flags.Int("handshake-failure-limit", 0, "failed handshakes allowed per remote IP per minute; -1 disables")
 	flags.String("log-level", "", "log level: debug, info, warn, or error")
+	flags.Bool("disable-websocket", false, "disable the websocket fallback listener")
+	flags.String("tcp-bind", "", "address to bind allocated TCP ports")
+	flags.Int("tcp-port-min", 0, "first public TCP port; 0 disables TCP forwarding")
+	flags.Int("tcp-port-max", 0, "last public TCP port; 0 disables TCP forwarding")
+	flags.String("tcp-public-host", "", "hostname advertised for allocated TCP ports")
+	flags.Int("max-tcp-per-token", 0, "TCP port reservations per token; -1 is unlimited")
+	flags.Int("max-tcp-connections", 0, "simultaneous public TCP connections per tunnel")
+	flags.Int("tcp-accept-limit", 0, "public TCP accepts per remote IP per minute; -1 disables")
 	showVersion := flags.Bool("version", false, "print version information")
 	if err := flags.Parse(args); err != nil {
 		return server.Config{}, nil, false, err
@@ -218,6 +237,38 @@ func loadServerConfig(args []string, output io.Writer) (server.Config, *slog.Log
 	if err != nil {
 		return server.Config{}, nil, false, err
 	}
+	resolvedDisableWS, err := pickBool(flags, "disable-websocket", "TUNNL_DISABLE_WEBSOCKET", file.DisableWebSocket, false)
+	if err != nil {
+		return server.Config{}, nil, false, err
+	}
+	resolvedTCPBind, err := pickString(flags, "tcp-bind", "TUNNL_TCP_BIND", file.TCPBind, "")
+	if err != nil {
+		return server.Config{}, nil, false, err
+	}
+	resolvedTCPMin, err := pickInt(flags, "tcp-port-min", "TUNNL_TCP_PORT_MIN", file.TCPPortMin, 0)
+	if err != nil {
+		return server.Config{}, nil, false, err
+	}
+	resolvedTCPMax, err := pickInt(flags, "tcp-port-max", "TUNNL_TCP_PORT_MAX", file.TCPPortMax, 0)
+	if err != nil {
+		return server.Config{}, nil, false, err
+	}
+	resolvedTCPHost, err := pickString(flags, "tcp-public-host", "TUNNL_TCP_PUBLIC_HOST", file.TCPPublicHost, "")
+	if err != nil {
+		return server.Config{}, nil, false, err
+	}
+	resolvedTCPPerToken, err := pickInt(flags, "max-tcp-per-token", "TUNNL_MAX_TCP_PER_TOKEN", file.MaxTCPPerToken, defaultMaxTCPPerToken)
+	if err != nil {
+		return server.Config{}, nil, false, err
+	}
+	resolvedTCPConns, err := pickInt(flags, "max-tcp-connections", "TUNNL_MAX_TCP_CONNECTIONS", file.MaxTCPConnections, defaultMaxTCPConns)
+	if err != nil {
+		return server.Config{}, nil, false, err
+	}
+	resolvedTCPAccepts, err := pickInt(flags, "tcp-accept-limit", "TUNNL_TCP_ACCEPT_LIMIT", file.TCPAcceptLimit, defaultTCPAcceptLimit)
+	if err != nil {
+		return server.Config{}, nil, false, err
+	}
 	level, err := parseLogLevel(resolvedLevel)
 	if err != nil {
 		return server.Config{}, nil, false, err
@@ -257,6 +308,14 @@ func loadServerConfig(args []string, output io.Writer) (server.Config, *slog.Log
 		RequestTimeout:        resolvedRequestTimeout,
 		AcceptLimit:           resolvedAccepts,
 		HandshakeFailureLimit: resolvedHandshakes,
+		DisableWebSocket:      resolvedDisableWS,
+		TCPBind:               resolvedTCPBind,
+		TCPPortMin:            resolvedTCPMin,
+		TCPPortMax:            resolvedTCPMax,
+		TCPPublicHost:         resolvedTCPHost,
+		MaxTCPPerToken:        resolvedTCPPerToken,
+		MaxTCPConnections:     resolvedTCPConns,
+		TCPAcceptLimit:        resolvedTCPAccepts,
 		Logger:                logger,
 	}, logger, false, nil
 }

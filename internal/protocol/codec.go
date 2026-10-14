@@ -137,7 +137,7 @@ func (c *Conn) ReadControl() (Control, error) {
 
 // WriteHello writes a client handshake.
 func (c *Conn) WriteHello(msg Hello) error {
-	if len(msg.Token) > MaxFrameSize || len(msg.Domain) > MaxFrameSize || len(msg.Mode) > MaxFrameSize {
+	if len(msg.Token) > MaxFrameSize || len(msg.Domain) > MaxFrameSize || len(msg.Mode) > MaxFrameSize || len(msg.Label) > MaxFrameSize {
 		return ErrFrameTooLarge
 	}
 	return c.write(msg)

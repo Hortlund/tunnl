@@ -44,7 +44,11 @@ func runAdmin(args []string) error {
 		fmt.Printf("process: %.1f%% CPU, %s heap, %d goroutines\nstorage: %s database, %s free\n", status.System.CPUPercent, formatAdminBytes(status.System.HeapBytes), status.System.Goroutines, formatAdminBytes(uint64(status.System.DatabaseBytes)), formatAdminBytes(status.System.DiskFreeBytes))
 		fmt.Printf("certificate: %s (%s), expires %s, renewal window %s\n", status.Certificate.State, status.Certificate.Mode, formatAdminTime(status.Certificate.NotAfter), formatAdminTime(status.Certificate.RenewalWindowStart))
 		for _, tunnel := range status.Tunnels {
-			fmt.Printf("  %s.%s  %s  connected %s\n", tunnel.Domain, status.BaseDomain, tunnel.Remote, tunnel.ConnectedAt.Local().Format(time.RFC3339))
+			name := tunnel.Domain + "." + status.BaseDomain
+			if tunnel.Mode == "tcp" && tunnel.Public != "" {
+				name = tunnel.Public
+			}
+			fmt.Printf("  %s  %s  connected %s\n", name, tunnel.Remote, tunnel.ConnectedAt.Local().Format(time.RFC3339))
 		}
 		return nil
 	case "metrics":
@@ -94,7 +98,7 @@ func formatAdminTime(value *time.Time) string {
 
 func runAdminTokens(ctx context.Context, client *admin.Client, args []string, jsonOutput bool) error {
 	if len(args) == 0 {
-		return errors.New("token command required: list, create, or revoke")
+		return errors.New("token command required: list, create, rotate, or revoke")
 	}
 	switch args[0] {
 	case "list":
@@ -129,6 +133,37 @@ func runAdminTokens(ctx context.Context, client *admin.Client, args []string, js
 			return printJSON(created)
 		}
 		fmt.Printf("created token %s (%s)\n%s\n\nStore this secret now; it cannot be retrieved again.\n", created.Label, created.ID, created.Secret)
+		return nil
+	case "rotate":
+		flags := flag.NewFlagSet("tunnld admin tokens rotate", flag.ContinueOnError)
+		id := flags.String("id", "", "token ID to replace")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *id == "" {
+			return errors.New("token ID is required")
+		}
+		values, err := client.Tokens(ctx)
+		if err != nil {
+			return err
+		}
+		label := ""
+		for _, value := range values {
+			if value.ID == *id {
+				label = value.Label
+			}
+		}
+		if label == "" {
+			return errors.New("token was not found")
+		}
+		created, err := client.CreateToken(ctx, label)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return printJSON(created)
+		}
+		fmt.Printf("created replacement token %s (%s)\n%s\n\nUpdate clients to this secret, then revoke %s. The previous token stays active until you revoke it.\n", created.Label, created.ID, created.Secret, *id)
 		return nil
 	case "revoke":
 		flags := flag.NewFlagSet("tunnld admin tokens revoke", flag.ContinueOnError)

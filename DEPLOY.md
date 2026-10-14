@@ -11,9 +11,9 @@ You still have to supply the domain, DNS, the VPS, and the DNS provider credenti
 | `tunnld` | VPS | TCP 8080 (HTTP), TCP 8443 (HTTPS), UDP 8443 (QUIC) |
 | Admin UI | VPS loopback | TCP 9090 |
 | Metrics, health, readiness | VPS loopback | TCP 9091 |
-| `tunnl` | Laptop | outbound QUIC to the relay |
+| `tunnl` | Laptop | outbound QUIC, or WebSocket on TCP 443 when UDP is blocked |
 
-Put a firewall or Docker port map in front so the public ports are 80, 443/tcp, and 443/udp. Leave 9090 and 9091 on loopback.
+Put a firewall or Docker port map in front so the public ports are 80, 443/tcp, and 443/udp. Leave 9090 and 9091 on loopback. Open the TCP forwarding range only after you set `TUNNL_TCP_PORT_MIN` and `TUNNL_TCP_PORT_MAX`.
 
 ## 1. DNS
 
@@ -25,7 +25,7 @@ Create these records at the DNS host for your domain. The examples use `example.
 | `*.example.com` | A and/or AAAA | VPS address | Proxied is fine for HTTP |
 | `relay.example.com` | A and/or AAAA | VPS address | DNS only |
 
-`relay` is the QUIC listener. A proxied record, including Cloudflare's orange cloud, terminates UDP and the client cannot connect. Public websites use the wildcard. The relay name itself is not a tunnel.
+`relay` is the QUIC listener and the WebSocket fallback endpoint. A proxied record, including Cloudflare's orange cloud, terminates UDP and QUIC cannot connect. The client then uses WebSocket on TCP 443, which a proxied record can also intercept, so keep `relay` DNS-only. Public websites use the wildcard. The relay name itself is not a tunnel.
 
 Let's Encrypt wildcard certificates need DNS-01. tunnl does that through Cloudflare. The token needs, on the zone you are issuing for:
 
@@ -45,8 +45,9 @@ Allow:
 - TCP 80, forwarded to `tunnld` HTTP (`:8080` in the container)
 - TCP 443, forwarded to `tunnld` HTTPS (`:8443`)
 - UDP 443, forwarded to `tunnld` QUIC (`:8443`)
+- the TCP port range, if you enable raw TCP forwarding, forwarded to the same ports on `tunnld`
 
-Do not publish the admin or metrics ports on the public address. Use SSH port forwarding when you need them:
+TCP 443 has to reach `tunnld` for HTTPS and for the WebSocket fallback. UDP 443 is the preferred tunnel transport. Do not publish the admin or metrics ports on the public address. Use SSH port forwarding when you need them:
 
 If the server logs that it could not raise the UDP receive buffer, set `net.core.rmem_max` and `net.core.wmem_max` to at least 7500000. The tunnel still runs without that; the larger buffers matter under load.
 
@@ -73,7 +74,14 @@ Precedence is the command-line flag, then the environment variable, then the JSO
   "max_response_body": 33554432,
   "request_timeout": "2m",
   "accept_limit": 30,
-  "handshake_failure_limit": 20
+  "handshake_failure_limit": 20,
+  "tcp_bind": "0.0.0.0",
+  "tcp_port_min": 20000,
+  "tcp_port_max": 20050,
+  "tcp_public_host": "example.com",
+  "max_tcp_per_token": 4,
+  "max_tcp_connections": 64,
+  "tcp_accept_limit": 60
 }
 ```
 
@@ -82,6 +90,10 @@ Pass it with `--config /etc/tunnl/tunnld.json` or `TUNNL_CONFIG`. Secrets fit be
 `accept_limit` is QUIC accepts per remote IP per minute (default 30). `handshake_failure_limit` is failed handshakes per remote IP per minute (default 20). Set either to `-1` to disable that limiter. Admin login attempts are limited to 10 per minute per remote IP. Body limits default to 32 MiB. The public request timeout defaults to 2 minutes. Header read stays at 10 seconds and keep-alive idle at 90 seconds.
 
 An empty `--metrics-addr` disables the metrics listener. The CLI default is `127.0.0.1:9091`.
+
+Leave `tcp_port_min` and `tcp_port_max` at `0` to keep raw TCP forwarding off. When both are set, each client token can hold `max_tcp_per_token` public ports (default 4). A port stays reserved for that token and local address across disconnects. `tcp_accept_limit` is public TCP accepts per remote IP per minute. `disable_websocket` turns off `GET /_tunnl/ws`. The fallback is enabled unless that flag or `TUNNL_DISABLE_WEBSOCKET=true` is set.
+
+Docker cannot publish an arbitrary port range as easily as a firewall rule. Run TCP forwarding on the systemd install, or publish the exact host ports you configured.
 
 ## 4. Install on a VPS
 
@@ -133,9 +145,10 @@ With the admin listener on loopback:
 export TUNNL_ADMIN_URL=http://127.0.0.1:9090
 export TUNNL_ADMIN_TOKEN='the-token-you-just-generated'
 tunnld admin tokens create --label laptop
+tunnld admin tokens rotate --id <token-id>
 ```
 
-The command prints a secret once. It is stored only as a SHA-256 hash. You can also create it in the browser at `http://127.0.0.1:9090`.
+The create and rotate commands print a secret once. It is stored only as a SHA-256 hash. Rotate creates a second token with the same label and leaves the old token active, so connected clients stay up until you point them at the new secret and run `tunnld admin tokens revoke --id <old-id>`. Revoke disconnects that token's HTTP and TCP sessions and deletes its TCP port reservations. You can also create, replace, and revoke tokens in the browser at `http://127.0.0.1:9090`.
 
 A server may start with no `TUNNL_AUTH_TOKENS` when `--admin-addr` is set, including on a later restart after a managed token exists. Bootstrap tokens in `TUNNL_AUTH_TOKENS` stay valid until you remove them. They are not listed or revoked by the admin API.
 
@@ -150,7 +163,15 @@ tunnl --server relay.example.com:443 --port 3000 --domain app
 
 The printed public URL is `https://app.example.com`. While you are still on the Let's Encrypt staging certificate, add `--insecure` so the client accepts the untrusted relay certificate. Browsers will keep warning until you switch off staging.
 
-The client reconnects with backoff. Logs default to text on stderr. `--log-format json` and `--log-level debug` are available.
+Publish a local TCP service after the server port range and firewall rule exist:
+
+```bash
+tunnl tcp --server relay.example.com:443 --port 5432
+```
+
+The client prints `tcp://example.com:<port>`. Set `TUNNL_TCP_PUBLIC_HOST` when that name should not be the base domain. The client dials only the local address you configured.
+
+The client reconnects with backoff. If QUIC does not connect within `--quic-timeout` (default 5s), it retries the same session over WebSocket on TCP 443 and prefers that transport next time. Authentication and configuration errors stop the retry loop and name the token to check. Logs default to text on stderr. `--log-format json` and `--log-level debug` are available.
 
 ## 7. Upgrade
 
