@@ -93,12 +93,14 @@ func TestPrometheusExposition(t *testing.T) {
 	collected.totalRequests.Add(4)
 	collected.handshakeFailures.Add(2)
 	var body strings.Builder
-	writePrometheus(&body, collected, 3)
+	writePrometheus(&body, collected, 3, 1)
 	text := body.String()
 	for _, line := range []string{
 		"tunnl_tunnels_active 3",
+		"tunnl_tcp_tunnels_active 1",
 		"tunnl_requests_total 4",
 		"tunnl_handshake_failures_total 2",
+		"tunnl_websocket_sessions_total 0",
 		`tunnl_build_info{version="dev",commit="none"} 1`,
 	} {
 		if !strings.Contains(text, line) {

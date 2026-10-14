@@ -21,6 +21,7 @@ import (
 
 	"github.com/Hortlund/tunnl/internal/admin"
 	"github.com/Hortlund/tunnl/internal/limit"
+	"github.com/Hortlund/tunnl/internal/link"
 	"github.com/Hortlund/tunnl/internal/names"
 	"github.com/Hortlund/tunnl/internal/protocol"
 	"github.com/Hortlund/tunnl/internal/store"
@@ -58,6 +59,14 @@ type Config struct {
 	AcceptWindow          time.Duration
 	HandshakeFailureLimit int
 	HandshakeWindow       time.Duration
+	DisableWebSocket      bool
+	TCPBind               string
+	TCPPortMin            int
+	TCPPortMax            int
+	TCPPublicHost         string
+	MaxTCPPerToken        int
+	MaxTCPConnections     int
+	TCPAcceptLimit        int
 }
 
 type Server struct {
@@ -70,9 +79,13 @@ type Server struct {
 	certificateSource *tlsutil.Source
 	accepts           *limit.Limiter
 	handshakes        *limit.Limiter
+	tcpAccepts        *limit.Limiter
+	tcpPorts          *tcpRegistry
+	tcpMu             sync.Mutex
 	connsMu           sync.Mutex
-	conns             map[*quic.Conn]struct{}
+	conns             map[link.Conn]struct{}
 	tunnels           sync.WaitGroup
+	runCtx            context.Context
 }
 
 func New(config Config) (*Server, error) {
@@ -124,6 +137,33 @@ func New(config Config) (*Server, error) {
 	if config.AcceptLimit < -1 || config.HandshakeFailureLimit < -1 {
 		return nil, errors.New("rate limits must be -1 to disable or a positive count")
 	}
+	if config.TCPPortMin != 0 || config.TCPPortMax != 0 {
+		span := config.TCPPortMax - config.TCPPortMin + 1
+		if config.TCPPortMin < 1 || config.TCPPortMax > 65535 || span < 1 || span > 4096 {
+			return nil, errors.New("tcp port range must be within 1-65535 and contain at most 4096 ports")
+		}
+		if config.TCPBind == "" {
+			config.TCPBind = "0.0.0.0"
+		}
+	}
+	if config.MaxTCPPerToken == 0 {
+		config.MaxTCPPerToken = 4
+	}
+	if config.MaxTCPPerToken < -1 {
+		return nil, errors.New("tcp port limit must be -1 to disable or a positive count")
+	}
+	if config.MaxTCPConnections == 0 {
+		config.MaxTCPConnections = 64
+	}
+	if config.MaxTCPConnections < 1 {
+		return nil, errors.New("tcp connection limit must be greater than zero")
+	}
+	if config.TCPAcceptLimit == 0 {
+		config.TCPAcceptLimit = 60
+	}
+	if config.TCPAcceptLimit < -1 {
+		return nil, errors.New("tcp accept limit must be -1 to disable or a positive count")
+	}
 	if config.ACMEEnabled {
 		if config.TLSCert != "" || config.TLSKey != "" {
 			return nil, errors.New("automatic ACME and manual TLS certificate files are mutually exclusive")
@@ -174,7 +214,9 @@ func New(config Config) (*Server, error) {
 		logger:     config.Logger,
 		accepts:    limit.New(config.AcceptLimit, config.AcceptWindow),
 		handshakes: limit.New(config.HandshakeFailureLimit, config.HandshakeWindow),
-		conns:      make(map[*quic.Conn]struct{}),
+		tcpAccepts: limit.New(config.TCPAcceptLimit, time.Minute),
+		tcpPorts:   newTCPRegistry(),
+		conns:      make(map[link.Conn]struct{}),
 	}
 	if config.AdminAddr != "" {
 		handler, err := admin.NewHandler(config.AdminToken, service, config.Logger)
@@ -190,6 +232,7 @@ func New(config Config) (*Server, error) {
 func (s *Server) Close() error { return s.store.Close() }
 
 func (s *Server) Run(ctx context.Context) error {
+	s.runCtx = ctx
 	certificateSource, err := tlsutil.NewSource(ctx, tlsutil.Options{
 		CertPath:           s.config.TLSCert,
 		KeyPath:            s.config.TLSKey,
@@ -207,7 +250,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.certificateSource = certificateSource
 	metricsCtx, stopMetrics := context.WithCancel(ctx)
 	defer stopMetrics()
-	s.metrics.sample(s.registry.count())
+	s.metrics.sample(s.activeTunnels())
 	go s.sampleMetrics(metricsCtx)
 	if certificateSource.Generated() {
 		s.logger.Warn("using an ephemeral self-signed development certificate")
@@ -262,7 +305,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 
-	s.logger.Info("tunnl server started", "http", s.config.HTTPAddr, "https", s.config.HTTPSAddr, "quic", s.config.QUICAddr, "admin", s.config.AdminAddr, "metrics", s.config.MetricsAddr, "base_domain", s.config.BaseDomain)
+	s.logger.Info("tunnl server started", "http", s.config.HTTPAddr, "https", s.config.HTTPSAddr, "quic", s.config.QUICAddr, "admin", s.config.AdminAddr, "metrics", s.config.MetricsAddr, "base_domain", s.config.BaseDomain, "tcp", s.tcpRange(), "websocket", !s.config.DisableWebSocket)
 	shutdown := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -311,7 +354,7 @@ func (s *Server) sampleMetrics(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.metrics.sample(s.registry.count())
+			s.metrics.sample(s.activeTunnels())
 		}
 	}
 }
@@ -326,28 +369,33 @@ func (s *Server) acceptTunnels(ctx context.Context, listener *quic.Listener) err
 			return err
 		}
 		ip := remoteIP(conn.RemoteAddr())
+		session := link.QUIC{Conn: conn}
 		if !s.accepts.Allow(ip) || !s.handshakes.Permitted(ip) {
 			s.metrics.rejectedAccepts.Add(1)
-			_ = conn.CloseWithError(1, "rate limited")
+			_ = session.CloseWithError(1, "rate limited")
 			continue
 		}
 		s.tunnels.Add(1)
-		s.track(conn)
+		s.track(session)
 		go func() {
 			defer s.tunnels.Done()
-			defer s.untrack(conn)
-			s.handleTunnel(ctx, conn)
+			defer s.untrack(session)
+			s.handleTunnel(ctx, session)
 		}()
 	}
 }
 
-func (s *Server) track(conn *quic.Conn) {
+func (s *Server) activeTunnels() int {
+	return s.registry.count() + s.tcpPorts.count()
+}
+
+func (s *Server) track(conn link.Conn) {
 	s.connsMu.Lock()
 	s.conns[conn] = struct{}{}
 	s.connsMu.Unlock()
 }
 
-func (s *Server) untrack(conn *quic.Conn) {
+func (s *Server) untrack(conn link.Conn) {
 	s.connsMu.Lock()
 	delete(s.conns, conn)
 	s.connsMu.Unlock()
@@ -355,23 +403,24 @@ func (s *Server) untrack(conn *quic.Conn) {
 
 func (s *Server) closeTracked() {
 	s.connsMu.Lock()
-	conns := make([]*quic.Conn, 0, len(s.conns))
+	conns := make([]link.Conn, 0, len(s.conns))
 	for conn := range s.conns {
 		conns = append(conns, conn)
 	}
 	s.connsMu.Unlock()
+	s.tcpPorts.closeAll()
 	for _, conn := range conns {
 		_ = conn.CloseWithError(0, "server shutting down")
 	}
 }
 
-func (s *Server) rejectHandshake(conn *quic.Conn, message string) {
+func (s *Server) rejectHandshake(conn link.Conn, message string) {
 	s.metrics.handshakeFailures.Add(1)
 	s.handshakes.Allow(remoteIP(conn.RemoteAddr()))
 	_ = conn.CloseWithError(1, message)
 }
 
-func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
+func (s *Server) handleTunnel(ctx context.Context, conn link.Conn) {
 	defer func() { _ = conn.CloseWithError(0, "tunnel session ended") }()
 	control, err := conn.AcceptStream(ctx)
 	if err != nil {
@@ -395,7 +444,12 @@ func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
 		s.rejectHandshake(conn, "authentication failed")
 		return
 	}
-	if hello.Mode != "http" {
+	switch hello.Mode {
+	case "tcp":
+		s.serveTCP(ctx, conn, wire, control, hello)
+		return
+	case "http":
+	default:
 		_ = wire.WriteWelcome(protocol.Welcome{Error: "unsupported tunnel mode"})
 		s.rejectHandshake(conn, "unsupported mode")
 		return
@@ -428,7 +482,7 @@ func (s *Server) handleTunnel(ctx context.Context, conn *quic.Conn) {
 	if err := wire.WriteWelcome(protocol.Welcome{OK: true, Domain: domain, URL: publicURL}); err != nil {
 		return
 	}
-	s.logger.Info("tunnel connected", "domain", domain, "remote", conn.RemoteAddr().String())
+	s.logger.Info("tunnel connected", "domain", domain, "remote", conn.RemoteAddr().String(), "transport", conn.Transport())
 	defer s.logger.Info("tunnel disconnected", "domain", domain)
 
 	for {
@@ -466,6 +520,7 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /_tunnl/health", s.health)
 	mux.HandleFunc("GET /_tunnl/ready", s.ready)
+	mux.HandleFunc("GET "+protocol.WebSocketPath, s.websocket)
 	mux.HandleFunc("/", s.proxy)
 	return mux
 }
@@ -484,7 +539,7 @@ func (s *Server) health(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writer.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(writer, `{"status":"ok","tunnels":%d}`+"\n", s.registry.count())
+	fmt.Fprintf(writer, `{"status":"ok","tunnels":%d}`+"\n", s.activeTunnels())
 }
 
 func (s *Server) ready(writer http.ResponseWriter, request *http.Request) {
@@ -497,7 +552,7 @@ func (s *Server) ready(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writer.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(writer, "{\"status\":\"ready\",\"tunnels\":%d}\n", s.registry.count())
+	fmt.Fprintf(writer, "{\"status\":\"ready\",\"tunnels\":%d}\n", s.activeTunnels())
 }
 
 func (s *Server) statusHost(hostport string) bool {
@@ -507,7 +562,7 @@ func (s *Server) statusHost(hostport string) bool {
 
 func (s *Server) prometheus(writer http.ResponseWriter, _ *http.Request) {
 	writer.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	writePrometheus(writer, s.metrics, s.registry.count())
+	writePrometheus(writer, s.metrics, s.registry.count(), s.tcpPorts.count())
 }
 
 func (s *Server) proxy(writer http.ResponseWriter, request *http.Request) {
@@ -679,7 +734,7 @@ func validateBaseDomain(domain string) error {
 	return nil
 }
 
-func finishRequestWrite(request *http.Request, stream *quic.Stream, writeDone <-chan error) {
+func finishRequestWrite(request *http.Request, stream link.Stream, writeDone <-chan error) {
 	select {
 	case <-writeDone:
 		return

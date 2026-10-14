@@ -68,6 +68,9 @@ type MetricSample struct {
 
 type Tunnel struct {
 	Domain      string    `json:"domain"`
+	Mode        string    `json:"mode,omitempty"`
+	Port        int       `json:"port,omitempty"`
+	Public      string    `json:"public,omitempty"`
 	Remote      string    `json:"remote"`
 	ConnectedAt time.Time `json:"connected_at"`
 }

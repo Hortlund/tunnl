@@ -9,6 +9,9 @@ const (
 	Version = 1
 	ALPN    = "tunnl/1"
 
+	// WebSocketPath is the HTTPS request path for the fallback transport.
+	WebSocketPath = "/_tunnl/ws"
+
 	// MaxFrameSize is the maximum size of one control value in bytes.
 	// Handshake and heartbeat messages are small. The cap stops a peer from
 	// forcing the process to buffer an arbitrarily large JSON value.
@@ -33,6 +36,7 @@ type Hello struct {
 	Token   string `json:"token"`
 	Domain  string `json:"domain,omitempty"`
 	Mode    string `json:"mode"`
+	Label   string `json:"label,omitempty"`
 }
 
 type Welcome struct {
@@ -40,6 +44,7 @@ type Welcome struct {
 	Error  string `json:"error,omitempty"`
 	Domain string `json:"domain,omitempty"`
 	URL    string `json:"url,omitempty"`
+	Port   int    `json:"port,omitempty"`
 }
 
 type Control struct {

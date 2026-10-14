@@ -82,7 +82,8 @@ async function loadStatus() {
   tunnelRows.replaceChildren();
   for (const tunnel of status.tunnels || []) {
     const row = document.createElement('tr');
-    cell(row, `${tunnel.domain}.${status.base_domain}`);
+    const endpoint = tunnel.mode === 'tcp' ? (tunnel.public || `tcp port ${tunnel.port}`) : (tunnel.public || `${tunnel.domain}.${status.base_domain}`);
+    cell(row, endpoint);
     cell(row, tunnel.remote, true);
     cell(row, formatTime(tunnel.connected_at));
     tunnelRows.append(row);
@@ -184,6 +185,20 @@ async function loadTokens() {
     cell(row, formatTime(token.created_at));
     cell(row, formatTime(token.last_used_at));
     const action = cell(row, '');
+    const replace = document.createElement('button');
+    replace.type = 'button'; replace.className = 'replace'; replace.textContent = 'Replace';
+    replace.addEventListener('click', async () => {
+      if (!confirm(`Issue a new secret for “${token.label}”? The current token stays active until you revoke it.`)) return;
+      replace.disabled = true;
+      try {
+        const created = await api('/api/v1/tokens', { method: 'POST', body: JSON.stringify({ label: token.label }) });
+        $('#created-secret').textContent = created.secret;
+        $('#secret-dialog').showModal();
+        await loadTokens();
+        showToast('New token created. Update clients, then revoke the old one.');
+      } catch (error) { showToast(error.message); replace.disabled = false; }
+    });
+    action.append(replace);
     const button = document.createElement('button');
     button.type = 'button'; button.className = 'revoke'; button.textContent = 'Revoke';
     button.addEventListener('click', async () => {

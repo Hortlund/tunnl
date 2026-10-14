@@ -23,6 +23,9 @@ type metrics struct {
 	responseBytes     atomic.Uint64
 	handshakeFailures atomic.Uint64
 	rejectedAccepts   atomic.Uint64
+	websocketSessions atomic.Uint64
+	tcpConnections    atomic.Uint64
+	tcpRejected       atomic.Uint64
 	mu                sync.RWMutex
 	history           []admin.MetricSample
 	previous          metricCounters

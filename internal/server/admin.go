@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -41,16 +42,27 @@ func (s *Server) Status(ctx context.Context) (admin.Status, error) {
 			LastEvent: value.LastEvent, LastEventAt: optionalTime(value.LastEventAt), LastError: value.LastError,
 		}
 	}
-	tunnels := make([]admin.Tunnel, 0, len(sessions))
+	tcpSessions := s.tcpPorts.snapshot()
+	tunnels := make([]admin.Tunnel, 0, len(sessions)+len(tcpSessions))
 	for _, value := range sessions {
-		tunnels = append(tunnels, admin.Tunnel{Domain: value.domain, Remote: value.remote, ConnectedAt: value.connectedAt})
+		tunnels = append(tunnels, admin.Tunnel{Domain: value.domain, Mode: "http", Remote: value.remote, ConnectedAt: value.connectedAt})
+	}
+	publicHost := s.config.TCPPublicHost
+	if publicHost == "" {
+		publicHost = s.config.BaseDomain
+	}
+	for _, value := range tcpSessions {
+		tunnels = append(tunnels, admin.Tunnel{
+			Domain: value.label, Mode: "tcp", Port: value.port, Remote: value.remote, ConnectedAt: value.connectedAt,
+			Public: "tcp://" + net.JoinHostPort(publicHost, strconv.Itoa(value.port)),
+		})
 	}
 	return admin.Status{
 		Version:          version.Version,
 		StartedAt:        s.metrics.startedAt,
 		UptimeSeconds:    int64(time.Since(s.metrics.startedAt).Seconds()),
 		BaseDomain:       s.config.BaseDomain,
-		ActiveTunnels:    len(sessions),
+		ActiveTunnels:    len(sessions) + len(tcpSessions),
 		Reservations:     reservations,
 		ManagedTokens:    managedTokens,
 		BootstrapTokens:  len(s.config.AuthTokens),
@@ -127,6 +139,9 @@ func (s *Server) RevokeToken(ctx context.Context, id string) error {
 	if err != nil {
 		return errors.New("token was not found")
 	}
+	if err := s.store.DeleteTCPByToken(ctx, tokenHash); err != nil {
+		return err
+	}
 	deleted, err := s.store.DeleteClientToken(ctx, id)
 	if err != nil {
 		return err
@@ -135,6 +150,7 @@ func (s *Server) RevokeToken(ctx context.Context, id string) error {
 		return errors.New("token was not found")
 	}
 	disconnected := s.registry.disconnectToken(tokenHash)
+	disconnected += s.tcpPorts.disconnectToken(tokenHash)
 	s.logger.Info("client token revoked", "token_id", id, "disconnected_tunnels", disconnected)
 	return nil
 }

@@ -5,7 +5,7 @@ Fast, reliable, self-hosted tunnels for exposing local HTTP services to the inte
 `tunnl` is the client your users install. `tunnld` is the server daemon you host. They are separate binaries built from one Go codebase and communicate over encrypted, multiplexed QUIC streams.
 
 > [!IMPORTANT]
-> HTTP forwarding is ready to deploy on a single VPS. See [DEPLOY.md](DEPLOY.md) for DNS, firewall, Let's Encrypt, tokens, upgrades, and backups. Raw TCP forwarding and a WebSocket fallback transport remain on the roadmap.
+> HTTP and raw TCP forwarding are ready to deploy on a single VPS. See [DEPLOY.md](DEPLOY.md) for DNS, firewall, Let's Encrypt, tokens, upgrades, and backups. The client uses QUIC and falls back to WebSocket over TLS when UDP is blocked.
 
 ## Why tunnl
 
@@ -34,6 +34,9 @@ tunnl --to http://192.168.1.50:8080 --domain dashboard
 
 # Override the Host header received by the local service.
 tunnl --port 3001 --domain app --host-header localhost:3001
+
+# Publish a local TCP port. The server allocates one public port from its configured range.
+tunnl tcp --port 5432
 ```
 
 The client persists automatically allocated names in the operating system's user configuration directory. A requested name is permanently associated with the client's token in the server database.
@@ -77,6 +80,33 @@ curl -H 'Host: demo.tunnl.test' http://127.0.0.1:18080
 ```
 
 TCP and UDP can share the same numeric port, so production maps both HTTPS/TCP and QUIC/UDP to port 443.
+
+To exercise raw TCP locally, start the server with a loopback port range and connect the TCP client:
+
+```bash
+TUNNL_AUTH_TOKENS=local-development-token \
+  ./bin/tunnld \
+  --base-domain tunnl.test \
+  --database .data/tunnl.db \
+  --http-addr 127.0.0.1:18080 \
+  --https-addr 127.0.0.1:18443 \
+  --quic-addr 127.0.0.1:18443 \
+  --public-port 18443 \
+  --tcp-bind 127.0.0.1 \
+  --tcp-port-min 20000 \
+  --tcp-port-max 20010 \
+  --tcp-public-host 127.0.0.1
+
+TUNNL_TOKEN=local-development-token \
+  ./bin/tunnl tcp \
+  --server localhost:18443 \
+  --insecure \
+  --port 5432
+```
+
+The client prints `tcp://127.0.0.1:<allocated-port>`. Connections to that port are spliced to `127.0.0.1:5432`. The same token and local address keep the public port across reconnects. TCP forwarding stays off until both `--tcp-port-min` and `--tcp-port-max` are set.
+
+If UDP to the relay fails, the client tries WebSocket at `https://<relay>/_tunnl/ws` and keeps using it on the next reconnect. `--websocket-only` skips QUIC. `--no-websocket` stays on QUIC. `--quic-timeout` defaults to 5s so a blackholed UDP network fails over quickly. A relay rejection, including a bad token, is not retried.
 
 ## Production deployment
 
@@ -218,6 +248,15 @@ Reconciliation creates or updates `*.tunnl.at` as a proxied record and `relay.tu
 | `TUNNL_ACCEPT_LIMIT` | `30` | QUIC accepts per remote IP per minute. `-1` disables the limiter |
 | `TUNNL_HANDSHAKE_FAILURE_LIMIT` | `20` | Failed handshakes per remote IP per minute. `-1` disables the limiter |
 | `TUNNL_LOG_FORMAT` | `text` | Client log format, `text` or `json` |
+| `TUNNL_QUIC_TIMEOUT` | `5s` | How long the client waits for QUIC before trying WebSocket |
+| `TUNNL_DISABLE_WEBSOCKET` | `false` | Disable the server's WebSocket fallback listener |
+| `TUNNL_TCP_BIND` | `0.0.0.0` when a range is set | Address allocated TCP ports bind |
+| `TUNNL_TCP_PORT_MIN` | `0` | First public TCP port. `0` with max `0` disables TCP forwarding |
+| `TUNNL_TCP_PORT_MAX` | `0` | Last public TCP port. The range holds at most 4096 ports |
+| `TUNNL_TCP_PUBLIC_HOST` | base domain | Hostname advertised in `tcp://` URLs |
+| `TUNNL_MAX_TCP_PER_TOKEN` | `4` | Stored TCP port reservations per token. `-1` is unlimited |
+| `TUNNL_MAX_TCP_CONNECTIONS` | `64` | Simultaneous public connections accepted on one TCP tunnel |
+| `TUNNL_TCP_ACCEPT_LIMIT` | `60` | Public TCP accepts per remote IP per minute. `-1` disables the limiter |
 
 Generate separate high-entropy tokens for each person. A domain reservation belongs to the SHA-256 hash of the token that created it, so another client token cannot claim it.
 
@@ -230,17 +269,16 @@ Leave `TUNNL_TRUST_PROXY_HEADERS` disabled unless direct access to the origin is
 - A reconnect with the same token atomically replaces an older connection.
 - Reservations survive disconnects and process restarts.
 - The proxy does not buffer whole request or response bodies.
-- Shutdown closes active QUIC sessions, drains HTTP listeners, and waits up to 15 seconds.
+- Shutdown closes active sessions, drains HTTP listeners, and waits up to 15 seconds.
 - Release builds embed protocol and application versions.
+- WebSocket fallback uses one ordered connection, so a slow stream can delay the others. QUIC does not have that head-of-line block.
 
 ## Roadmap
 
-1. WebSocket-over-TLS fallback for networks that block UDP.
-2. Raw TCP forwarding using allocated public ports.
-3. WebSocket upgrade tunneling and expanded HTTP integration tests.
-4. Per-user quotas and abuse response beyond the connection, handshake, and admin login rate limits.
-5. User-owned custom domains and automated validation.
-6. PostgreSQL and multi-node routing if horizontal scaling becomes necessary.
+1. WebSocket upgrade tunneling for the published HTTP service.
+2. Per-user quotas and abuse response beyond the connection, handshake, TCP, and admin login rate limits.
+3. User-owned custom domains and automated validation.
+4. PostgreSQL and multi-node routing if horizontal scaling becomes necessary.
 
 See [the architecture decision record](docs/architecture/0001-foundation.md) for the protocol and deployment rationale.
 
